@@ -1,0 +1,125 @@
+﻿# curve_v3 配置示例（YAML）
+#
+# 用法（示例）：
+#   from curve_v3.config_yaml import load_curve_v3_config_yaml
+#   cfg = load_curve_v3_config_yaml("configs/curve_v3.yaml")
+#
+# 说明：
+# - 顶层键对应 curve_v3.configs.CurveV3Config 的字段名。
+# - 未提供的字段会使用 dataclass 默认值。
+# - 未知字段会报错，避免“写了但不生效”。
+
+physics:
+  gravity: 9.8
+  ground_normal: [0.0, 1.0, 0.0]
+  ball_radius_m: 0.033
+  # bounce_contact_y_m: null  # null 表示跟随 ball_radius_m
+
+pipeline:
+  # full: 两阶段完整流水线（默认）
+  # simple: 最小基线（prefit 3 曲线 + bounce 冻结 + postfit 3 曲线）
+  mode: simple
+
+simple:
+  # simple mode 下的“简单反弹系数预测”（当 post 点不足以 postfit 时用于兜底）。
+  e: 0.70
+  kt: 0.65
+  kt_angle_rad: 0.0
+  postfit_min_points: 2
+  postfit_max_points: 8
+
+prior:
+  e_bins: [0.55, 0.70, 0.85]
+  kt_bins: [0.45, 0.65, 0.85]
+  e_range: [0.05, 1.25]
+  kt_angle_bins_rad: [0.0]
+  kt_range: [-1.2, 1.2]
+
+candidate:
+  candidate_beta_warmup_points: 2
+  candidate_beta_min: 0.3
+
+posterior:
+  fit_mode: rls
+  fit_params: v_only
+  max_post_points: 999
+  weight_sigma_m: 0.15
+  posterior_obs_sigma_m: null
+  posterior_prior_strength: 1.0
+  posterior_prior_sigma_v: 2.0
+  posterior_prior_sigma_a: 8.0
+  posterior_anchor_weight: 0.15
+  posterior_rls_lambda: 1.0
+  posterior_min_tau_s: 1.0e-6
+  posterior_optimize_tb: false
+  posterior_tb_search_window_s: 0.05
+  posterior_tb_search_step_s: 0.002
+  posterior_tb_prior_sigma_s: 0.03
+
+pixel:
+  pixel_enabled: false
+  pixel_max_iters: 2
+  pixel_huber_delta_px: 3.0
+  pixel_gate_tau_px: 0.0
+  pixel_min_cameras: 1
+  pixel_refine_top_k: null
+  pixel_lm_damping: 1.0e-3
+  pixel_fd_rel_step: 1.0e-3
+
+prefit:
+  prefit_xz_window_points: 12
+  prefit_robust_iters: 1
+  prefit_robust_delta_m: 0.12
+  prefit_min_inlier_points: 5
+  prefit_pixel_enabled: true
+  prefit_pixel_gate_tau_px: 0.0
+  prefit_pixel_huber_delta_px: 5.0
+  prefit_pixel_min_cameras: 1
+
+bounce_detector:
+  bounce_detector_v_down_mps: 0.6
+  bounce_detector_v_up_mps: 0.4
+  bounce_detector_eps_y_m: 0.04
+  bounce_detector_down_debounce_s: 0.03
+  bounce_detector_up_debounce_s: 0.03
+  bounce_detector_local_min_window: 7
+  bounce_detector_min_points: 6
+  bounce_detector_gap_freeze_enabled: true
+  bounce_detector_gap_mult: 3.0
+  bounce_detector_gap_tb_margin_s: 0.033
+  bounce_detector_gap_fit_points: 12
+
+corridor:
+  corridor_dt: 0.05
+  corridor_horizon_s: 1.2
+  corridor_quantile_levels: [0.05, 0.95]
+  corridor_components_k: 2
+
+online_prior:
+  online_prior_enabled: false
+  online_prior_path: null
+  online_prior_ema_alpha: 0.05
+  online_prior_eps: 1.0e-8
+  online_prior_autosave: true
+
+low_snr:
+  low_snr_enabled: false
+  low_snr_prefit_window_points: 7
+  low_snr_conf_cmin: 0.05
+  low_snr_sigma_x0_m: 0.10
+  low_snr_sigma_y0_m: 0.05
+  low_snr_sigma_z0_m: 0.10
+  low_snr_delta_k_freeze_a: 4.0
+  low_snr_delta_k_strong_v: 2.0
+  low_snr_delta_k_ignore: 1.0
+  low_snr_min_points_for_v: 3
+  low_snr_disallow_ignore_y: true
+  low_snr_strong_prior_v_scale: 0.1
+  low_snr_prefit_strong_sigma_v_mps: 0.5
+
+legacy:
+  net_height_1: 0.4
+  net_height_2: 1.1
+  legacy_receive_dt: 0.02
+  legacy_too_close_to_land_s: 0.03
+  z_speed_range: [1.0, 27.0]

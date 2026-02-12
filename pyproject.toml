@@ -1,0 +1,70 @@
+[project]
+name = "mvs-deployment"
+version = "0.1.0"
+description = "MVS_Deployment workspace root (virtual project)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  # 说明：workspace root 自身不产出 Python 包；通过依赖将各 member 装入同一环境。
+  "mvs",
+  "curve-v3",
+  "interception",
+  "fiducial-pose",
+  "tennis3d-core",
+  "tennis3d-trajectory",
+  "tennis3d-detectors",
+  "tennis3d-online",
+  "tennis3d-offline",
+  "ipython>=8.38.0",
+  # 说明：显式固定 PyTorch CUDA 版本，并从 PyTorch 官方索引安装 cu128 轮子。
+  "torch==2.6.0+cu128",
+  "torchvision==0.21.0+cu128",
+  "ultralytics>=8.4.6",
+]
+
+[tool.uv]
+# 说明：将 root 作为 virtual project（不 build、不 install），只作为 workspace 的聚合入口。
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.workspace]
+# 说明：显式列出 workspace members，避免把历史/废弃内容误装进环境（例如已清理的旧 curve 包）。
+members = [
+  "packages/mvs",
+  "packages/curve_v3",
+  "packages/interception",
+  "packages/fiducial_pose",
+  "packages/tennis3d_core",
+  "packages/tennis3d_trajectory",
+  "packages/tennis3d_detectors",
+  "packages/tennis3d_online",
+  "packages/tennis3d_offline",
+]
+
+[tool.uv.sources]
+# 说明：显式声明 workspace 内部依赖从 workspace 提供（而非从 PyPI 拉取同名包）。
+mvs = { workspace = true }
+curve-v3 = { workspace = true }
+interception = { workspace = true }
+fiducial-pose = { workspace = true }
+tennis3d-core = { workspace = true }
+tennis3d-trajectory = { workspace = true }
+tennis3d-detectors = { workspace = true }
+tennis3d-online = { workspace = true }
+tennis3d-offline = { workspace = true }
+
+# 说明：将 torch/torchvision 绑定到 PyTorch 官方 cu128 索引，避免走默认 PyPI。
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

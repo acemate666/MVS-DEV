@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>synthetic noisy demo (curve_v3 + interception)</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 20px; }
+    .row { display: grid; grid-template-columns: 1fr; gap: 18px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px 14px; }
+    .muted { color: #666; }
+    svg { width: 100%; height: auto; }
+    .legend { display: flex; flex-wrap: wrap; gap: 10px 14px; margin-top: 8px; }
+    .tag { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    code { background: #f6f6f6; padding: 1px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h2>synthetic noisy demo (curve_v3 + interception)</h2>
+  <p class="muted">提示：这是静态 HTML + SVG，可直接在 VS Code 打开预览；无需额外依赖。</p>
+
+  <div class="card">
+    <div><b>图例</b></div>
+    <div class="legend">
+      <div class="tag"><span class="dot" style="background:#1f77b4"></span>观测点（含噪）</div>
+      <div class="tag"><span class="dot" style="background:#2ca02c"></span>预测/真值采样轨迹</div>
+      <div class="tag"><span class="dot" style="background:#ff7f0e"></span>corridor 均值（xz）</div>
+      <div class="tag"><span class="dot" style="background:#d62728"></span>interception 目标点</div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <div><b>俯视图（x-z）</b></div>
+      <svg viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg">
+<rect x="1" y="1" width="898" height="518" fill="#fff" stroke="#ddd" />
+<text x="40" y="30" fill="#444" font-size="14">x-z view</text>
+<polyline points="409.46,282.35 429.21,271.72 448.96,261.10 468.71,250.47 488.47,239.84 508.22,229.22 527.97,218.59 547.72,207.96 567.47,197.33 587.23,186.71 606.98,176.08 626.73,165.45 646.48,154.83 666.23,144.20 685.98,133.57 705.74,122.95 725.49,112.32" fill="none" stroke="#ff7f0e" stroke-width="1.5" opacity="0.55" />
+<polyline points="409.46,282.35 435.29,268.45 461.12,254.56 486.95,240.66 512.78,226.76 538.61,212.87 564.44,198.97 590.26,185.07 616.09,171.18 641.92,157.28 667.75,143.38 693.58,129.48 719.41,115.59 745.24,101.69 771.07,87.79 796.90,73.90 822.73,60.00" fill="none" stroke="#ff7f0e" stroke-width="1.5" opacity="0.55" />
+<polyline points="409.46,282.35 431.83,270.32 454.20,258.28 476.57,246.24 498.94,234.21 521.31,222.17 543.68,210.14 566.05,198.10 588.42,186.06 610.79,174.03 633.16,161.99 655.53,149.96 677.90,137.92 700.27,125.88 722.64,113.85 745.01,101.81 767.38,89.78" fill="none" stroke="#ff7f0e" stroke-width="2.5" opacity="0.85" />
+<polyline points="409.46,282.35 414.82,279.47 420.17,276.59 425.53,273.71 430.89,270.82 436.24,267.94 441.60,265.06 446.95,262.18 452.31,259.30 457.67,256.41 463.02,253.53 468.38,250.65 473.74,247.77 479.09,244.89 484.45,242.00 489.81,239.12 495.16,236.24 500.52,233.36 505.88,230.48 511.23,227.59 516.59,224.71 521.94,221.83 527.30,218.95 532.66,216.07 538.01,213.19 543.37,210.30 548.73,207.42 554.08,204.54 559.44,201.66 564.80,198.78 570.15,195.89 575.51,193.01 580.86,190.13 586.22,187.25 591.58,184.37 596.93,181.48 602.29,178.60 607.65,175.72 613.00,172.84 618.36,169.96 623.72,167.07 629.07,164.19 634.43,161.31 639.79,158.43 645.14,155.55 650.50,152.66 655.85,149.78 661.21,146.90 666.57,144.02 671.92,141.14 677.28,138.26 682.64,135.37 687.99,132.49 693.35,129.61 698.71,126.73 704.06,123.85 709.42,120.96 714.78,118.08 720.13,115.20 725.49,112.32" fill="none" stroke="#2ca02c" stroke-width="2.0" opacity="0.85" />
+<circle cx="77.27" cy="460.00" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="102.89" cy="446.45" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="134.69" cy="433.23" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="147.39" cy="419.24" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="167.75" cy="406.12" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="201.54" cy="392.04" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="233.06" cy="378.29" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="263.62" cy="364.41" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="286.99" cy="351.20" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="303.47" cy="337.11" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="328.75" cy="323.60" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="362.33" cy="309.71" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="382.00" cy="295.85" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="418.60" cy="281.86" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="450.71" cy="260.95" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="481.86" cy="239.65" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="525.25" cy="218.43" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="606.37" cy="172.18" r="6.0" fill="#d62728" opacity="0.9" />
+<text x="614.37" y="164.18" fill="#d62728" font-size="12">hit_target</text>
+</svg>
+    </div>
+
+    <div class="card">
+      <div><b>高度随时间（t_rel-y）</b></div>
+      <svg viewBox="0 0 900 420" xmlns="http://www.w3.org/2000/svg">
+<rect x="1" y="1" width="898" height="418" fill="#fff" stroke="#ddd" />
+<text x="40" y="30" fill="#444" font-size="14">t_rel-y view</text>
+<line x1="378.07" y1="40" x2="378.07" y2="380" stroke="#999" stroke-dasharray="4 4" />
+<text x="384.07" y="54" fill="#777" font-size="12">t_b</text>
+<polyline points="378.07,243.31 385.84,236.02 393.62,229.05 401.39,222.40 409.17,216.06 416.94,210.04 424.72,204.34 432.49,198.96 440.27,193.89 448.04,189.14 455.82,184.71 463.59,180.60 471.37,176.80 479.14,173.33 486.92,170.16 494.69,167.32 502.47,164.80 510.24,162.59 518.02,160.70 525.79,159.12 533.57,157.87 541.34,156.93 549.12,156.31 556.89,156.00 564.67,156.02 572.44,156.35 580.22,157.00 587.99,157.97 595.77,159.25 603.54,160.85 611.32,162.77 619.09,165.01 626.87,167.56 634.64,170.44 642.42,173.63 650.19,177.13 657.97,180.96 665.74,185.10 673.52,189.56 681.29,194.33 689.07,199.43 696.84,204.84 704.62,210.57 712.39,216.62 720.17,222.98 727.94,229.66 735.72,236.66 743.49,243.98 751.27,251.62 759.04,259.57 766.82,267.84 774.59,276.42 782.37,285.33 790.14,294.55 797.92,304.09 805.69,313.95 813.47,324.12 821.24,334.61 829.02,345.42 836.79,356.55" fill="none" stroke="#2ca02c" stroke-width="2.0" opacity="0.85" />
+<circle cx="63.21" cy="73.14" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="87.47" cy="68.41" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="111.73" cy="63.45" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="135.99" cy="66.96" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="160.25" cy="70.08" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="184.50" cy="77.58" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="208.76" cy="84.80" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="233.02" cy="100.92" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="257.28" cy="115.78" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="281.54" cy="136.04" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="305.80" cy="157.99" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="330.06" cy="182.71" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="354.32" cy="211.88" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="378.58" cy="245.53" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="435.41" cy="195.57" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="492.75" cy="166.41" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="550.09" cy="155.23" r="3.00" fill="#1f77b4" opacity="0.850" />
+<circle cx="674.57" cy="187.45" r="6.0" fill="#d62728" opacity="0.9" />
+</svg>
+    </div>
+
+    <div class="card">
+      <div><b>本次生成参数</b></div>
+      <ul>
+        <li><b>seed</b>: 0</li>
+<li><b>sigma_m</b>: 0.01</li>
+<li><b>pre_points</b>: 14</li>
+<li><b>post_points</b>: 3</li>
+<li><b>bounce_t_rel</b>: 0.5491071793991935</li>
+<li><b>hit_valid</b>: True</li>
+<li><b>hit_reason</b>: None</li>
+<li><b>hit_target</b>: {&#39;x&#39;: 1.2455408183541987, &#39;y&#39;: 0.35, &#39;z&#39;: 7.685247500882581, &#39;t_abs&#39;: 101.06619494619474, &#39;t_rel&#39;: 1.0661949461947415}</li>
+      </ul>
+      <div class="muted">输出文件：<code>artifacts\synthetic_noisy.html</code></div>
+    </div>
+  </div>
+</body>
+</html>

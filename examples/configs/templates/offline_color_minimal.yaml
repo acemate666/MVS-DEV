@@ -1,0 +1,128 @@
+﻿# 离线 3D 定位配置模板（最小可用：color 检测器）
+#
+# 适用：
+# - 你想先把“读 captures -> 检测 -> 三角化 -> 输出 JSONL”这条链路跑通
+# - 不依赖深度学习模型（无需 .pt/.rknn）
+#
+# 用法示例：
+# - uv run python -m tennis3d.apps.offline_localize_from_captures --config examples/configs/templates/offline_color_minimal.yaml
+
+input:
+  # captures 目录：要求包含 metadata.jsonl（由 python -m mvs.apps.quad_capture 生成）
+  # 说明：这里写占位符，使用前请替换为你的实际目录。
+  captures_dir: <PATH_TO_CAPTURES_DIR>
+
+  # 标定文件：支持 .json/.yaml/.yml（字段见 examples/configs/templates/calibration_multi_camera.yaml）
+  # 说明：在线/离线 pipeline 默认用“相机 serial 字符串”作为 camera_name，所以标定文件 cameras 的 key 也建议用 serial。
+  calib: <PATH_TO_CALIB_JSON_OR_YAML>
+
+detector:
+  # 检测器后端：fake|color|rknn|pt
+  # - color：基于 HSV 的“绿色球/亮色目标”阈值检测，用于链路验证
+  # - fake：直接读入或生成假检测（更偏单元/冒烟）
+  name: color
+
+  # color/fake 不需要模型路径；留空即可（空字符串会被当作 None）
+  model: ""
+
+  # 置信度阈值：作为 pipeline 的 min_score（颜色检测通常会给固定分数）
+  min_score: 0.25
+
+  # 至少需要几路相机同时检测到目标才输出 3D
+  require_views: 2
+
+  # 多球鲁棒定位参数（即使你当前只关心“最小链路”，也建议保留这些字段，便于后续调参）：
+  # - 每路相机最多取 topK 个候选参与跨视角匹配（防止组合爆炸）
+  max_detections_per_camera: 10
+
+  # - 3D 候选的最大重投影误差阈值（像素），越小越严格、误检越少
+  max_reproj_error_px: 8.0
+
+  # - 把 3D 点投影到某相机后，与该相机检测框中心匹配的最大距离（像素）
+  max_uv_match_dist_px: 25.0
+
+  # - 3D 去重阈值（米）：不同相机组合可能得到同一球的重复解
+  merge_dist_m: 0.08
+
+run:
+  # 最多处理多少个 group（0 表示不限）
+  max_groups: 0
+
+output:
+  # 输出 JSONL 路径（每行一个 3D 定位结果）。默认值如下：
+  out_jsonl: data/tools_output/offline_positions_3d.jsonl
+
+time:
+  # 时间轴（默认值：frame_host_timestamp）
+  sync_mode: frame_host_timestamp
+
+  # 可选：映射文件路径。
+  # - 仅在 sync_mode=dev_timestamp_mapping 时生效
+  # - 为空表示使用默认路径：<captures_dir>/time_mapping_dev_to_host_ms.json
+  mapping_path: ""
+
+# 可选：轨迹后处理（curve_stage，基于 curve_v3）。默认 disabled。
+curve:
+  enabled: false
+
+  track:
+    max_tracks: 4
+    association_dist_m: 0.6
+    max_missed_s: 0.6
+    min_dt_s: 0.000001
+
+  corridor:
+    y_min: 0.6
+    y_max: 1.6
+    y_step: 0.1
+
+  # 可选：击球拦截点输出（interception）
+  interception:
+    enabled: false
+    y_min: 0.7
+    y_max: 1.2
+    num_heights: 5
+    r_hit_m: 0.15
+
+  conf:
+    from: quality
+    constant: 1.0
+
+  transform:
+    y_offset_m: 0.0
+    y_negate: false
+
+  # 观测过滤（默认关闭；要求上游定位输出包含对应诊断字段）
+  obs_filter:
+    min_views: 0
+    min_quality: 0.0
+    max_median_reproj_error_px: null
+    max_ball_3d_std_m: null
+
+  # 轨迹片段（episode）判定（默认关闭）
+  # 起始判定固定为：z 方向门控 + y 轴重力一致性（ay≈g）。
+  episode:
+    enabled: false
+    buffer_s: 0.6
+    min_obs: 5
+
+    start:
+      z_dir: 0
+      min_abs_dz_m: 0.25
+      min_abs_vz_mps: 1.0
+      gravity_mps2: 9.8
+      gravity_tol_mps2: 3.0
+
+    end:
+      stationary_speed_mps: 0.25
+      end_if_stationary_s: 0.35
+      end_after_predicted_land_s: 0.2
+
+    behavior:
+      reset_predictor_on_start: true
+      reset_predictor_on_end: true
+      feed_curve_only_when_active: false
+
+    # 可选：episode 多 track 处置策略（默认关闭）
+    multi_track:
+      lock_single_track: false

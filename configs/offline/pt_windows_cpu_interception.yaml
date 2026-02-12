@@ -1,0 +1,95 @@
+# 离线 3D 定位配置（Windows/CPU，使用 Ultralytics YOLOv8 .pt）
+# 目标：开启 curve_stage + interception（击球拦截点）输出。
+# 用法示例（任选其一）：
+# - uv run python -m tennis3d.apps.offline_localize_from_captures --config configs/offline/pt_windows_cpu_interception.yaml
+# - tennis3d-offline --config configs/offline/pt_windows_cpu_interception.yaml
+
+input:
+  captures_dir: data/captures_master_slave/tennis_test
+  calib: data/calibration/example_triple_camera_calib.json
+
+# detector 配置与 configs/offline/pt_windows_cpu.yaml 保持一致（便于对照）。
+detector:
+  name: pt
+  model: data/models/best.pt
+  min_score: 0.25
+  require_views: 2
+  max_detections_per_camera: 10
+  max_reproj_error_px: 10.0
+  max_uv_match_dist_px: 25.0
+  merge_dist_m: 0.08
+
+run:
+  max_groups: 0
+
+output:
+  out_jsonl: data/tools_output/offline_positions_3d.pt.interception.jsonl
+
+# 轨迹后处理（curve_stage，基于 curve_v3）。
+# 启用后：每条输出记录新增顶层 `curve`，并在 track 快照中输出 `interception`。
+curve:
+  enabled: true
+
+  # 多球关联/track 管理
+  track:
+    max_tracks: 4
+    association_dist_m: 0.6
+    max_missed_s: 0.6
+    min_dt_s: 0.000001
+
+  # 走廊输出：在 y=[y_min,y_max] 的多个平面上输出 xz 的统计
+  corridor:
+    y_min: 0.6
+    y_max: 1.6
+    y_step: 0.1
+
+  # 击球拦截点（interception）
+  interception:
+    enabled: true
+    y_min: 0.7
+    y_max: 1.2
+    num_heights: 5
+    r_hit_m: 0.15
+
+  # 点级置信度来源：quality（用 3D 定位质量）或 constant（常量权重）
+  conf:
+    from: quality
+    constant: 1.0
+
+  # 对输入到 curve 的坐标做轻量变换（不修改上游 balls[*].ball_3d_world）
+  transform:
+    y_offset_m: 0.0
+    y_negate: false
+
+  # 观测过滤（默认关闭；需要上游定位输出包含对应诊断字段）
+  obs_filter:
+    min_views: 0
+    min_quality: 0.0
+    max_median_reproj_error_px: null
+    max_ball_3d_std_m: null
+
+  # episode（默认关闭）
+  episode:
+    enabled: false
+    buffer_s: 0.6
+    min_obs: 5
+
+    start:
+      z_dir: 0
+      min_abs_dz_m: 0.25
+      min_abs_vz_mps: 1.0
+      gravity_mps2: 9.8
+      gravity_tol_mps2: 3.0
+
+    end:
+      stationary_speed_mps: 0.25
+      end_if_stationary_s: 0.35
+      end_after_predicted_land_s: 0.2
+
+    behavior:
+      reset_predictor_on_start: true
+      reset_predictor_on_end: true
+      feed_curve_only_when_active: false
+
+    multi_track:
+      lock_single_track: false

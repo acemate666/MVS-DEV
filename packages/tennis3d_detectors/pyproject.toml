@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tennis3d-detectors"
+version = "0.1.0"
+description = "Tennis 3D detectors: torch/ultralytics/RKNN adapters"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "opencv-python",
+  "tennis3d-core",
+  # 说明：PyTorch 版本号按 upstream 实际发布的语义版本；此前的 2.10 / 0.25 属于笔误。
+  # workspace root 会 pin 到具体的 `+cu128` 轮子版本（见根目录 pyproject.toml）。
+  "torch>=2.6.0",
+  "torchvision>=0.21.0",
+  "ultralytics>=8.4.6",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]

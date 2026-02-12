@@ -1,0 +1,480 @@
+"""定位流水线核心：检测 -> 多视角三角化/定位。
+
+本模块刻意保持“无框架依赖”（不依赖 FastAPI/线程池/消息队列等），只依赖三类输入：
+- groups：迭代器，产出 (meta, images_by_camera)
+- detector：检测器，提供 detect(img_bgr)->list[Detection]
+- calib：标定集 CalibrationSet
+
+输出为可 JSON 序列化的 dict 记录，便于落盘（jsonl）与后处理。
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from typing import Any, Iterable, Iterator
+
+import numpy as np
+
+from tennis3d.models import BatchDetector, Detection, Detector
+from tennis3d.geometry.calibration import CalibrationSet
+from tennis3d.geometry.triangulation import estimate_triangulation_cov_world
+from tennis3d.localization.localize import localize_balls
+from tennis3d.pipeline.roi import RoiController
+from tennis3d.preprocess import shift_detections
+from tennis3d.sync.aligner import PassthroughAligner, SyncAligner
+
+
+def _safe_float3(x: np.ndarray) -> list[float]:
+    """把长度为 3 的 ndarray 转成纯 Python float 列表。
+
+    说明：
+        - JSON 序列化时，numpy 标量类型会导致不可序列化或输出不一致。
+        - 这里显式转为 float，保证输出稳定。
+    """
+
+    return [float(x[0]), float(x[1]), float(x[2])]
+
+
+def _safe_mat(x: np.ndarray) -> list[list[float]]:
+    """把二维 ndarray 转成 JSON 友好的纯 Python 列表。"""
+
+    x = np.asarray(x, dtype=np.float64)
+    return [[float(v) for v in row] for row in x]
+
+
+def _camera_center_world(*, calib: Any) -> np.ndarray:
+    """由 world->camera 外参计算相机在 world 坐标系下的光心位置。"""
+
+    R_wc = np.asarray(getattr(calib, "R_wc"), dtype=np.float64).reshape(3, 3)
+    t_wc = np.asarray(getattr(calib, "t_wc"), dtype=np.float64).reshape(3)
+    R_cw = R_wc.T
+    return (-R_cw @ t_wc.reshape(3)).astype(np.float64)
+
+
+def _estimate_uv_sigma_px(*, bbox: tuple[float, float, float, float] | None, score: float | None) -> float:
+    """用极简启发式估计检测中心点的像素标准差（sigma）。
+
+    说明：
+        - 这里的目标是“提供可记录的协方差尺度”，便于后续离线分析与拟合加权；
+          不追求严格统计最优。
+        - 当上游没有 bbox/score 时，回退到常量。
+        - 经验上：score 越低、不确定度越大；bbox 越小、中心点越不稳定。
+    """
+
+    base_sigma = 2.0
+    if bbox is None or score is None:
+        return float(base_sigma)
+
+    x1, y1, x2, y2 = bbox
+    w = max(1.0, float(x2) - float(x1))
+    h = max(1.0, float(y2) - float(y1))
+    size = math.sqrt(w * h)
+
+    s = float(max(1e-3, min(1.0, float(score))))
+
+    # size_ref 越大，表示“典型球框大小”越大，sigma 会更小。
+    size_ref = 20.0
+    sigma = float(base_sigma) * math.sqrt(size_ref / max(1.0, size)) / math.sqrt(s)
+    # 夹紧到合理范围，避免极端值污染日志。
+    return float(min(12.0, max(0.8, sigma)))
+
+
+def run_localization_pipeline(
+    *,
+    groups: Iterable[tuple[dict[str, Any], dict[str, np.ndarray]]],
+    calib: CalibrationSet,
+    detector: Detector,
+    min_score: float,
+    require_views: int,
+    max_detections_per_camera: int,
+    max_reproj_error_px: float,
+    max_uv_match_dist_px: float,
+    merge_dist_m: float,
+    include_detection_details: bool = True,
+    aligner: SyncAligner | None = None,
+    roi_controller: RoiController | None = None,
+) -> Iterator[dict[str, Any]]:
+    """对输入 groups 运行端到端定位流水线。
+
+    流程：
+        1) (Optional) 对齐：通过 aligner 调整 meta/images（例如按时间戳筛掉不完整组）。
+        2) 检测：对每路图像调用 detector.detect 得到多个候选 Detection。
+        3) 多球定位：跨视角匹配 + DLT 三角化 + 重投影误差 gating + 3D 去重 + 冲突消解。
+
+    Args:
+        groups: 迭代器，产出 (meta, images_by_camera)。meta 需可 JSON 序列化。
+        calib: 已加载的标定集。
+        detector: 检测器后端。
+        min_score: 最低置信度阈值（低于阈值的检测会被忽略）。
+        require_views: 三角化所需的最少视角数。
+        max_detections_per_camera: 每个相机最多取 score topK 候选参与匹配。
+        max_reproj_error_px: 重投影误差阈值（像素）。
+        max_uv_match_dist_px: 投影补全匹配阈值（像素）。
+        merge_dist_m: 3D 去重阈值（米）。
+        include_detection_details: 是否在输出中包含每路选用的 bbox/score/center。
+        aligner: 对齐器；为 None 时使用 PassthroughAligner（不做对齐）。
+
+    Yields:
+        可 JSON 序列化的记录：包含 balls 列表（0..N）。
+    """
+
+    if aligner is None:
+        aligner = PassthroughAligner()
+
+    for meta, images_by_camera in groups:
+        # 说明：延迟诊断统一使用主机单调时钟（monotonic）。
+        # - 适用于统计处理耗时/排队积压/抖动；
+        # - 不受系统时间校时（NTP/手动改时）影响；
+        # - 与 capture_t_abs（epoch）不是同一时间轴，二者不要直接相减。
+        t_pipe_start = time.monotonic()
+
+        aligned = aligner.align(meta or {}, images_by_camera or {})
+        if aligned is None:
+            continue
+        meta, images_by_camera = aligned
+
+        t_after_align = time.monotonic()
+
+        detections_by_camera: dict[str, list[Detection]] = {}
+        detect_ms_by_camera: dict[str, float] = {}
+
+        # 预处理阶段（可选动态软件裁剪）：为跨相机 micro-batch 做准备。
+        items: list[tuple[str, np.ndarray, tuple[int, int], np.ndarray]] = []
+        for serial, img in images_by_camera.items():
+            if img is None:
+                continue
+
+            cam = str(serial)
+
+            # Optional：软件裁剪（动态 ROI）以降低 detector 输入尺寸。
+            # 注意：裁剪坐标系下的 bbox 需要加回 offset 才能保持下游几何一致。
+            img_for_det = img
+            offset_xy = (0, 0)
+            if roi_controller is not None:
+                try:
+                    img_for_det, offset_xy = roi_controller.preprocess_for_detection(
+                        meta=meta,
+                        camera=cam,
+                        img_bgr=img,
+                        calib=calib,
+                    )
+                except Exception:
+                    img_for_det = img
+                    offset_xy = (0, 0)
+
+            items.append((cam, img_for_det, (int(offset_xy[0]), int(offset_xy[1])), img))
+
+        # 检测阶段：若 detector 支持 detect_batch，则对“同一组内的多相机”做 micro-batch。
+        dets_by_cam: dict[str, list[Detection]] = {}
+        if isinstance(detector, BatchDetector) and len(items) >= 2:
+            imgs = [it[1] for it in items]
+
+            _t_det0 = time.monotonic()
+            try:
+                dets_list = detector.detect_batch(imgs)
+            except Exception:
+                dets_list = []
+            _t_det1 = time.monotonic()
+
+            # 若 batch 推理失败或返回长度异常，回退到逐图 detect（保持鲁棒性与旧行为）。
+            if not isinstance(dets_list, list) or len(dets_list) != len(items):
+                dets_list = []
+                for cam, img_for_det, _offset_xy, _img in items:
+                    _t0 = time.monotonic()
+                    dets = detector.detect(img_for_det)
+                    _t1 = time.monotonic()
+                    try:
+                        detect_ms_by_camera[cam] = float(1000.0 * max(0.0, _t1 - _t0))
+                    except Exception:
+                        pass
+                    dets_list.append(list(dets or []))
+            else:
+                # 说明：batch 模式下无法精确分摊每相机耗时；这里用“均摊”作为近似诊断指标。
+                total_ms = float(1000.0 * max(0.0, _t_det1 - _t_det0))
+                per_ms = float(total_ms / max(1, len(items)))
+                for cam, _img_for_det, _offset_xy, _img in items:
+                    detect_ms_by_camera[cam] = float(per_ms)
+
+            for (cam, _img_for_det, _offset_xy, _img), dets in zip(items, dets_list, strict=False):
+                dets_by_cam[cam] = list(dets or [])
+        else:
+            for cam, img_for_det, _offset_xy, _img in items:
+                # 说明：detect 的耗时通常是在线模式最主要的时延来源之一。
+                # 这里记录每相机 detect 的 host monotonic 耗时（毫秒），便于定位瓶颈。
+                _t_det0 = time.monotonic()
+                dets = detector.detect(img_for_det)
+                _t_det1 = time.monotonic()
+                try:
+                    detect_ms_by_camera[cam] = float(1000.0 * max(0.0, _t_det1 - _t_det0))
+                except Exception:
+                    pass
+                dets_by_cam[cam] = list(dets or [])
+
+        # 后处理：把软件裁剪坐标系下的 bbox 加回 offset，并按标定 image_size 做 clip。
+        for cam, _img_for_det, offset_xy, img in items:
+            dets = list(dets_by_cam.get(cam) or [])
+
+            if dets and (offset_xy[0] != 0 or offset_xy[1] != 0):
+                # 关键点：offset_xy 的语义应当是“回写到标定坐标系”。
+                # - software crop：回写到相机输出图像坐标系（通常等于标定 image_size）。
+                # - runtime AOI：回写到满幅标定坐标系（大于当前 AOI 图像尺寸）。
+                # 因此 clip_shape 必须按标定的 image_size，而不能用当前 img.shape（AOI 尺寸），
+                # 否则 offset 加回后会被错误截断，导致重投影误差/三角化直接崩溃。
+                clip_shape = None
+                try:
+                    cam_calib = calib.require(cam)
+                    w_calib, h_calib = cam_calib.image_size  # (W,H)
+                    clip_shape = (int(h_calib), int(w_calib))
+                except Exception:
+                    # 防御性回退：标定缺失/异常时，仍按当前图像尺寸裁剪，保持旧行为。
+                    clip_shape = (int(img.shape[0]), int(img.shape[1]))
+                dets = shift_detections(
+                    list(dets),
+                    dx=int(offset_xy[0]),
+                    dy=int(offset_xy[1]),
+                    clip_shape=clip_shape,
+                )
+
+            if dets:
+                detections_by_camera[cam] = list(dets)
+
+        # 诊断字段：记录“本组每路相机的检测数量”。
+        # 说明：
+        # - out_rec['balls'] 是三角化后的 3D 结果；当 balls=0 时，无法区分是“无检出”还是“多视角几何没配上”。
+        # - 因此这里额外记录 detector 的输出规模，便于在线排障（不会影响几何/输出语义）。
+        cams_in_group = [str(x[0]) for x in items]
+        detections_n_by_camera: dict[str, int] = {
+            cam: int(len(detections_by_camera.get(cam) or [])) for cam in cams_in_group
+        }
+        detections_n_by_camera_min_score: dict[str, int] = {
+            cam: int(
+                sum(
+                    1
+                    for d in (detections_by_camera.get(cam) or [])
+                    if float(getattr(d, "score", 0.0)) >= float(min_score)
+                )
+            )
+            for cam in cams_in_group
+        }
+        detections_n_total = int(sum(detections_n_by_camera.values()))
+        detections_n_total_min_score = int(sum(detections_n_by_camera_min_score.values()))
+
+        t_after_detect = time.monotonic()
+
+        locs = localize_balls(
+            calib=calib,
+            detections_by_camera=detections_by_camera,
+            min_score=float(min_score),
+            require_views=int(require_views),
+            max_detections_per_camera=int(max_detections_per_camera),
+            max_reproj_error_px=float(max_reproj_error_px),
+            max_uv_match_dist_px=float(max_uv_match_dist_px),
+            merge_dist_m=float(merge_dist_m),
+        )
+
+        t_after_localize = time.monotonic()
+
+        balls_out: list[dict[str, Any]] = []
+        for i, loc in enumerate(locs):
+            err_pxs = [float(e.error_px) for e in loc.reprojection_errors]
+            med_err = float(np.median(np.asarray(err_pxs, dtype=np.float64))) if err_pxs else float("inf")
+            max_err = float(max(err_pxs)) if err_pxs else float("inf")
+
+            # 每相机误差字典：便于把 uv_hat / 误差合并到 obs_2d_by_camera。
+            err_by_cam = {str(e.camera): e for e in (loc.reprojection_errors or [])}
+
+            # 构造每相机像素协方差（2x2）。目前采用“对角+启发式 sigma”形式。
+            cov_uv_by_camera: dict[str, np.ndarray] = {}
+            obs_2d_by_camera: dict[str, Any] = {}
+            for cam_name, uv in (loc.points_uv or {}).items():
+                cam_name = str(cam_name)
+                u, v = float(uv[0]), float(uv[1])
+
+                det = (loc.detections or {}).get(cam_name)
+                bbox = det.bbox if det is not None else None
+                score = float(det.score) if det is not None else None
+
+                det_idx = None
+                if (loc.detection_indices or {}).get(cam_name) is not None:
+                    det_idx = int((loc.detection_indices or {})[cam_name])
+
+                sigma = _estimate_uv_sigma_px(bbox=bbox, score=score)
+                cov = np.array([[sigma * sigma, 0.0], [0.0, sigma * sigma]], dtype=np.float64)
+                cov_uv_by_camera[cam_name] = cov
+
+                e = err_by_cam.get(cam_name)
+                obs_2d_by_camera[cam_name] = {
+                    "uv": [u, v],
+                    "cov_uv": _safe_mat(cov),
+                    "sigma_px": float(sigma),
+                    "cov_source": "heuristic_bbox_score" if det is not None else "default_constant",
+                    # 以下为诊断字段：存在则填充，不存在则为 None
+                    "uv_hat": [float(e.uv_hat[0]), float(e.uv_hat[1])] if e is not None else None,
+                    "reproj_error_px": float(e.error_px) if e is not None else None,
+                    "detection_index": det_idx,
+                }
+
+            # 三角化 3D 协方差：用于后续轨迹拟合加权/可视化诊断。
+            projections_used = {k: calib.require(str(k)).P for k in cov_uv_by_camera.keys() if str(k) in calib.cameras}
+            cov_X = estimate_triangulation_cov_world(
+                projections=projections_used,
+                X_w=loc.X_w,
+                cov_uv_by_camera=cov_uv_by_camera,
+                min_views=2,
+            )
+
+            ball_3d_cov_world = _safe_mat(cov_X) if cov_X is not None else None
+            ball_3d_std_m = None
+            if cov_X is not None:
+                try:
+                    std = np.sqrt(np.maximum(np.diag(cov_X).astype(np.float64), 0.0))
+                    ball_3d_std_m = [float(std[0]), float(std[1]), float(std[2])]
+                except Exception:
+                    ball_3d_std_m = None
+
+            # 视角几何统计：最小/中位/最大 ray angle（度）。夹角越大通常三角化越稳。
+            ray_angles_deg: list[float] = []
+            used_cam_names = list((loc.points_uv or {}).keys())
+            X_w = np.asarray(loc.X_w, dtype=np.float64).reshape(3)
+            for ia in range(len(used_cam_names)):
+                for ib in range(ia + 1, len(used_cam_names)):
+                    ca = str(used_cam_names[ia])
+                    cb = str(used_cam_names[ib])
+                    if ca not in calib.cameras or cb not in calib.cameras:
+                        continue
+                    Cwa = _camera_center_world(calib=calib.require(ca))
+                    Cwb = _camera_center_world(calib=calib.require(cb))
+                    va = X_w - Cwa.reshape(3)
+                    vb = X_w - Cwb.reshape(3)
+                    na = float(np.linalg.norm(va))
+                    nb = float(np.linalg.norm(vb))
+                    if na <= 1e-9 or nb <= 1e-9:
+                        continue
+                    cosang = float(np.dot(va, vb) / (na * nb))
+                    cosang = float(max(-1.0, min(1.0, cosang)))
+                    ang = float(math.degrees(math.acos(cosang)))
+                    if math.isfinite(ang):
+                        ray_angles_deg.append(float(ang))
+
+            ray_angle_min = float(min(ray_angles_deg)) if ray_angles_deg else None
+            ray_angle_med = None
+            ray_angle_max = float(max(ray_angles_deg)) if ray_angles_deg else None
+            if ray_angles_deg:
+                ray_angle_med = float(np.median(np.asarray(ray_angles_deg, dtype=np.float64)))
+
+            b: dict[str, Any] = {
+                "ball_id": int(i),
+                "ball_3d_world": _safe_float3(loc.X_w),
+                "ball_3d_camera": {k: _safe_float3(v) for k, v in loc.X_c_by_camera.items()},
+                "used_cameras": list(loc.points_uv.keys()),
+                "quality": float(loc.quality),
+                "num_views": int(len(loc.points_uv)),
+                "median_reproj_error_px": float(med_err),
+                "max_reproj_error_px": float(max_err),
+                # 新增：每相机 2D 观测（uv）与协方差（px^2），以及与重投影相关的诊断信息。
+                "obs_2d_by_camera": obs_2d_by_camera,
+                # 新增：3D 点协方差（世界坐标系，m^2）。若几何退化/不可逆则为 None。
+                "ball_3d_cov_world": ball_3d_cov_world,
+                # 新增：3D 点坐标标准差（m），用于人类可读诊断。
+                "ball_3d_std_m": ball_3d_std_m,
+                # 新增：三角化几何统计（用于评估视角退化）。
+                "triangulation_stats": {
+                    "num_pairs": int(len(ray_angles_deg)),
+                    "ray_angle_deg_min": ray_angle_min,
+                    "ray_angle_deg_median": ray_angle_med,
+                    "ray_angle_deg_max": ray_angle_max,
+                },
+                "reprojection_errors": [
+                    {
+                        "camera": e.camera,
+                        "uv": [float(e.uv[0]), float(e.uv[1])],
+                        "uv_hat": [float(e.uv_hat[0]), float(e.uv_hat[1])],
+                        "error_px": float(e.error_px),
+                    }
+                    for e in loc.reprojection_errors
+                ],
+            }
+
+            if include_detection_details:
+                b["detections"] = {
+                    k: {
+                        "bbox": [float(d.bbox[0]), float(d.bbox[1]), float(d.bbox[2]), float(d.bbox[3])],
+                        "score": float(d.score),
+                        "cls": int(d.cls),
+                        "center": [float(d.center[0]), float(d.center[1])],
+                    }
+                    for k, d in loc.detections.items()
+                }
+
+            balls_out.append(b)
+
+        out_rec: dict[str, Any] = {
+            "created_at": time.time(),
+            **(meta or {}),
+            # 说明：latency_host 仅用于诊断；字段稳定、可 JSON 序列化。
+            "latency_host": {
+                "pipe_start_monotonic": float(t_pipe_start),
+                "after_align_monotonic": float(t_after_align),
+                "after_detect_monotonic": float(t_after_detect),
+                "after_localize_monotonic": float(t_after_localize),
+                "pipe_end_monotonic": float(time.monotonic()),
+                "align_ms": float(1000.0 * max(0.0, t_after_align - t_pipe_start)),
+                "detect_ms": float(1000.0 * max(0.0, t_after_detect - t_after_align)),
+                "localize_ms": float(1000.0 * max(0.0, t_after_localize - t_after_detect)),
+                "total_ms": float(1000.0 * max(0.0, time.monotonic() - t_pipe_start)),
+                "detect_ms_by_camera": dict(detect_ms_by_camera),
+            },
+            "balls": balls_out,
+            # 诊断字段：detector 输出规模（便于解释 balls=0 的原因）。
+            # - *_min_score 统计的是 score>=min_score 的数量（更贴近 localize_balls 的有效输入）。
+            "detections_n_by_camera": dict(detections_n_by_camera),
+            "detections_n_total": int(detections_n_total),
+            "detections_n_by_camera_min_score": dict(detections_n_by_camera_min_score),
+            "detections_n_total_min_score": int(detections_n_total_min_score),
+        }
+
+        # 端到端滞后（capture epoch -> record 创建时刻）。
+        #
+        # 说明：
+        # - 当处理速度 < 采集速度时，这个值会持续增长，是判断 backlog 的直观指标。
+        # - capture_t_abs 来自输入 meta（在线通常由 tennis3d_online.sources 产出；离线可选产出）。
+        try:
+            ta = out_rec.get("capture_t_abs")
+            ca = out_rec.get("created_at")
+            if ta is not None and ca is not None:
+                lag_ms = 1000.0 * (float(ca) - float(ta))
+                if math.isfinite(float(lag_ms)):
+                    out_rec["pipeline_lag_ms"] = float(lag_ms)
+        except Exception:
+            pass
+
+        # 统一的毫秒口径 timing 输出（便于下游解析与回归）。
+        #
+        # 说明：latency_host 中包含更细的 monotonic 打点；timing_ms 只保留 ms 指标视图。
+        try:
+            lat = out_rec.get("latency_host")
+            if isinstance(lat, dict):
+                def _to_float(x: Any) -> float | None:
+                    try:
+                        return float(x)
+                    except Exception:
+                        return None
+
+                out_rec["timing_ms"] = {
+                    "align_ms": _to_float(lat.get("align_ms")),
+                    "detect_ms": _to_float(lat.get("detect_ms")),
+                    "localize_ms": _to_float(lat.get("localize_ms")),
+                    "pipeline_total_ms": _to_float(lat.get("total_ms")),
+                    "detect_ms_by_camera": dict(lat.get("detect_ms_by_camera") or {}),
+                }
+        except Exception:
+            pass
+
+        if roi_controller is not None:
+            try:
+                roi_controller.update_after_output(out_rec=out_rec, calib=calib)
+            except Exception:
+                pass
+
+        yield out_rec

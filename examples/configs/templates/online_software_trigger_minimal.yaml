@@ -1,0 +1,219 @@
+﻿# 在线采集 + 3D 定位配置模板（纯软件触发，全字段）
+#
+# 说明：字段与 `packages/tennis3d_core/src/tennis3d/config.py` 完全对齐。
+# - 有默认值的字段：写出默认值
+# - 必填但没有默认值的字段：使用占位符（<...>）
+#
+# 用法示例：
+# - uv run python -m tennis3d_online --config examples/configs/templates/online_software_trigger_minimal.yaml
+sdk:
+  # MVS Python 示例绑定目录（MvImport，可选）：
+  mvimport_dir: ""
+
+  # MVS SDK 动态库目录（可选）。如果你的环境已配置好 PATH，可留空。
+  dll_dir: ""
+
+camera:
+  # 相机序列号列表（必填，至少 1 个；多相机建议 2~4 个）
+  serials:
+    - "<CAM1_SERIAL>"
+    - "<CAM2_SERIAL>"
+
+  # 标定文件
+  calib: data/calibration/example_triple_camera_calib.json
+
+  # 可选：相机图像参数（会传给 SDK）。
+  # - pixel_format 为空表示不设置（沿用相机当前配置）。
+  # - roi.width/roi.height 必须同时设置；不设置就留空或删除。
+  #
+  # 说明：这里的 ROI 是“相机侧裁剪”（改变相机输出宽高/偏移），不是缩放。
+  pixel_format: ""
+  # roi:
+  #   width: 1920
+  #   height: 1080
+  #   offset_x: 0
+  #   offset_y: 0
+
+  # 可选：曝光/增益（会在 StartGrabbing 前下发到相机）。
+  # 默认保持旧行为：关闭 Auto，并设置固定曝光/增益。
+  # - 若想完全不干预曝光/增益，可显式设置：
+  #   exposure:
+  #     auto: ""
+  #     time_us: null
+  #   gain:
+  #     auto: ""
+  #     value: null
+  exposure:
+    auto: Off
+    time_us: 10000.0
+  gain:
+    auto: Off
+    value: 12.0
+
+  # 相机侧 AOI（可选，进阶）：运行中动态平移 OffsetX/OffsetY。
+  #
+  # 典型用法：
+  # 1) 先设置 roi.width/roi.height（固定窗口尺寸）并给一个合理的初始 offset
+  # 2) 再启用 aoi.runtime 让窗口跟随球移动（降带宽）
+  # 3) 如需进一步提速，可叠加 detector.crop.size（在 AOI 内二次软件裁剪）
+  #
+  # 注意：需要机型支持在取流中写 OffsetX/OffsetY；不支持时写入会失败，窗口不会移动。
+  # aoi:
+  #   runtime: true
+  #   update_every_groups: 2
+  #   min_move_px: 8
+  #   smooth_alpha: 0.3
+  #   max_step_px: 160
+  #   recenter_after_missed: 30
+
+run:
+  # 分组对齐策略：frame_num|sequence
+  # 一般在线采集推荐 frame_num。
+  group_by: frame_num
+
+  # 超时/缓存控制（ms/数量），用于避免一直等不到“齐组”导致的阻塞/内存增长
+  timeout_ms: 1000
+  group_timeout_ms: 1000
+  max_pending_groups: 256
+  max_groups: 0
+
+  # 可选：实时策略（latest-only）。默认 false（不改变既有行为）。
+  latest_only: false
+
+time:
+  # 在线时间轴（默认值：frame_host_timestamp）
+  # - frame_host_timestamp：沿用原逻辑，用组内 frames[*].host_timestamp 中位数
+  # - dev_timestamp_mapping：启用在线滑窗映射（dev_timestamp -> host_ms），更贴近曝光时刻
+  sync_mode: frame_host_timestamp
+
+  # 以下为在线滑窗映射参数（均为默认值）。仅在 sync_mode=dev_timestamp_mapping 时会用到。
+  mapping_warmup_groups: 20
+  mapping_window_groups: 200
+  mapping_update_every_groups: 5
+  mapping_min_points: 20
+  mapping_hard_outlier_ms: 50.0
+
+detector:
+  # 检测器后端：fake|color|rknn|pt
+  # 默认 name=fake（只用于链路/冒烟）。真实使用通常会改成 pt，并填写 model 路径。
+  name: fake
+  model: ""
+
+  # detector=pt 时可选：Ultralytics 推理设备（默认 cpu）。
+  pt_device: cpu
+
+  # 软件裁剪（动态 ROI，可选）：在 detector 前裁剪小窗口以提高吞吐。
+  # - size=0 表示关闭（默认）。
+  # - bbox 会自动加回 offset，保证下游仍使用原图像素坐标系。
+  # crop:
+  #   size: 640
+  #   smooth_alpha: 0.2
+  #   max_step_px: 120
+  #   reset_after_missed: 8
+
+  min_score: 0.25
+  require_views: 2
+
+  # 多球鲁棒定位参数：
+  max_detections_per_camera: 10
+  max_reproj_error_px: 8.0
+  max_uv_match_dist_px: 25.0
+  merge_dist_m: 0.08
+
+output:
+  # 输出 JSONL（可选）。默认值：不写文件。
+  # - 置空（""）表示 None
+  # - 填路径则会持续追加写入
+  out_jsonl: ""
+
+  # JSONL 写盘策略（性能相关）
+  out_jsonl_only_when_balls: false
+  out_jsonl_flush_every_records: 1
+  out_jsonl_flush_interval_s: 0.0
+
+  # 终端输出策略
+  terminal_print_mode: best
+  terminal_status_interval_s: 0.0
+
+  # 可选：逐组（每个 loop / record）打印耗时分解。
+  # - true 会比较“吵”，建议配合 terminal_print_mode=none 或 best。
+  terminal_timing: false
+
+# 触发配置：
+# - trigger_source=Software 且 master_serial 为空：所有相机都设为 Software，并对全部相机下发软触发
+trigger:
+  trigger_source: Software
+  master_serial: ""
+  soft_trigger_fps: 5.0
+
+  # 以下字段是主从触发时会用到的“线配置”，软件触发可保持默认
+  master_line_out: Line1
+  master_line_source: ""
+  master_line_mode: Output
+  trigger_activation: FallingEdge
+  trigger_cache_enable: false
+
+# 可选：轨迹后处理（curve_stage，基于 curve_v3）。默认 disabled。
+curve:
+  enabled: false
+
+  track:
+    max_tracks: 4
+    association_dist_m: 0.6
+    max_missed_s: 0.6
+    min_dt_s: 0.000001
+
+  corridor:
+    y_min: 0.6
+    y_max: 1.6
+    y_step: 0.1
+
+  interception:
+    enabled: false
+    y_min: 0.7
+    y_max: 1.2
+    num_heights: 5
+    r_hit_m: 0.15
+
+  conf:
+    from: quality
+    constant: 1.0
+
+  transform:
+    y_offset_m: 0.0
+    y_negate: false
+
+  # 观测过滤（默认关闭；要求上游定位输出包含对应诊断字段）
+  obs_filter:
+    min_views: 0
+    min_quality: 0.0
+    max_median_reproj_error_px: null
+    max_ball_3d_std_m: null
+
+  # 轨迹片段（episode）判定（默认关闭）
+  # 起始判定固定为：z 方向门控 + y 轴重力一致性（ay≈g）。
+  episode:
+    enabled: false
+    buffer_s: 0.6
+    min_obs: 5
+
+    start:
+      z_dir: 0
+      min_abs_dz_m: 0.25
+      min_abs_vz_mps: 1.0
+      gravity_mps2: 9.8
+      gravity_tol_mps2: 3.0
+
+    end:
+      stationary_speed_mps: 0.25
+      end_if_stationary_s: 0.35
+      end_after_predicted_land_s: 0.2
+
+    behavior:
+      reset_predictor_on_start: true
+      reset_predictor_on_end: true
+      feed_curve_only_when_active: false
+
+    # 可选：episode 多 track 处置策略（默认关闭）
+    multi_track:
+      lock_single_track: false

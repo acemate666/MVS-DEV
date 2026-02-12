@@ -1,0 +1,118 @@
+# 在线采集 + 3D 定位配置（Windows/CPU，使用 Ultralytics YOLOv8 .pt）
+# 目标：在软件触发基础上开启 curve_stage + interception（击球拦截点）输出。
+# 用法示例：
+# - uv run python -m tennis3d_online --config configs/online/pt_windows_cpu_software_trigger_interception.yaml
+# - tennis3d-online --config configs/online/pt_windows_cpu_software_trigger_interception.yaml
+
+sdk:
+  mvimport_dir: ""
+  dll_dir: ""
+
+camera:
+  serials:
+    - "DA8199285"
+    - "DA8199303"
+    - "DA8199402"
+  calib: data/calibration/example_triple_camera_calib.json
+
+  exposure:
+    auto: Off
+    time_us: 10000.0
+  gain:
+    auto: Off
+    value: 12.0
+
+run:
+  group_by: frame_num
+  timeout_ms: 1000
+  group_timeout_ms: 1000
+  max_pending_groups: 256
+  max_groups: 0
+
+  # 可选：实时策略（latest-only）。默认 false（不改变既有行为）。
+  latest_only: false
+
+detector:
+  name: pt
+  model: data/models/best.pt
+  min_score: 0.25
+  require_views: 2
+  max_detections_per_camera: 10
+  max_reproj_error_px: 8.0
+  max_uv_match_dist_px: 25.0
+  merge_dist_m: 0.08
+
+output:
+  out_jsonl: data/tools_output/online_positions_3d.pt.interception.jsonl
+
+trigger:
+  trigger_source: Software
+  master_serial: ""
+  soft_trigger_fps: 5.0
+  master_line_out: Line1
+  master_line_source: ""
+  master_line_mode: Output
+  trigger_activation: FallingEdge
+  trigger_cache_enable: false
+
+# 轨迹后处理（curve_stage，基于 curve_v3）。
+# 启用后：每条输出记录新增顶层 `curve`，并在 track 快照中输出 `interception`。
+curve:
+  enabled: true
+
+  track:
+    max_tracks: 4
+    association_dist_m: 0.6
+    max_missed_s: 0.6
+    min_dt_s: 0.000001
+
+  corridor:
+    y_min: 0.6
+    y_max: 1.6
+    y_step: 0.1
+
+  interception:
+    enabled: true
+    y_min: 0.7
+    y_max: 1.2
+    num_heights: 5
+    r_hit_m: 0.15
+
+  conf:
+    from: quality
+    constant: 1.0
+
+  transform:
+    y_offset_m: 0.0
+    y_negate: false
+
+  obs_filter:
+    min_views: 0
+    min_quality: 0.0
+    max_median_reproj_error_px: null
+    max_ball_3d_std_m: null
+
+  episode:
+    enabled: false
+    buffer_s: 0.6
+    min_obs: 5
+
+    start:
+      z_dir: 0
+      min_abs_dz_m: 0.25
+      min_abs_vz_mps: 1.0
+      gravity_mps2: 9.8
+      gravity_tol_mps2: 3.0
+
+    end:
+      stationary_speed_mps: 0.25
+      end_if_stationary_s: 0.35
+      end_after_predicted_land_s: 0.2
+
+    behavior:
+      reset_predictor_on_start: true
+      reset_predictor_on_end: true
+      feed_curve_only_when_active: false
+
+    multi_track:
+      lock_single_track: false

@@ -1,0 +1,169 @@
+﻿# 在线采集 + 3D 定位配置（Windows/CPU，使用 Ultralytics YOLOv8 .pt）
+# 用法示例：
+# - uv run python -m tennis3d_online --config configs/online/pt_windows_cpu_software_trigger.yaml
+# - tennis3d-online --config configs/online/pt_windows_cpu_software_trigger.yaml
+
+sdk:
+  # MVS Python 示例绑定目录（MvImport，可选）：
+  # - 推荐设置环境变量：MVS_MVIMPORT_DIR=<.../MvImport>
+  # - 或在此处填写目录路径（包含 MvCameraControl_class.py 等文件）
+  mvimport_dir: ""
+
+  # MVS SDK 动态库目录（可选）：
+  # - 推荐设置环境变量：MVS_DLL_DIR=<...>
+  # - 或在此处填写目录路径（包含 MvCameraControl.dll）
+  # 如果你的环境已经配置好 PATH，也可以留空。
+  dll_dir: ""
+
+camera:
+  # 相机序列号列表（必填，至少 1 个；多相机建议 2~4 个）
+  serials:
+    - "DA8199285"
+    - "DA8199303"
+    - "DA8199402"
+
+  # 标定文件
+  calib: data/calibration/example_triple_camera_calib.json
+
+  # 曝光/增益：默认保持旧行为（关闭 Auto + 固定参数）。
+  exposure:
+    auto: Off
+    time_us: 10000.0
+  gain:
+    auto: Off
+    value: 12.0
+
+  # 可选：相机侧 ROI（硬件裁剪）；不配置则沿用相机当前输出。
+  # roi:
+  #   width: 1280
+  #   height: 1080
+  #   offset_x: 0
+  #   offset_y: 0
+
+  # 可选：相机侧 AOI（运行中动态 OffsetX/OffsetY）。
+  # aoi:
+  #   runtime: true
+  #   update_every_groups: 2
+  #   min_move_px: 8
+  #   smooth_alpha: 0.3
+  #   max_step_px: 160
+  #   recenter_after_missed: 30
+
+run:
+  # 分组对齐策略：frame_num|sequence
+  group_by: frame_num
+
+  # 超时/缓存控制（ms/数量），用于避免一直等不到“齐组”导致的阻塞/内存增长
+  timeout_ms: 1000
+  group_timeout_ms: 1000
+  max_pending_groups: 256
+  max_groups: 0
+
+  # 可选：实时策略（latest-only）。默认 false（不改变既有行为）。
+  latest_only: false
+
+detector:
+  # 检测器后端：fake|color|rknn|pt
+  # Windows 上通常使用 pt。
+  name: pt
+
+  # detector=pt 时必填（.pt）
+  model: data/models/best.pt
+
+  # 软件裁剪（动态 ROI，可选）：在 detector 前裁剪小窗口以提高吞吐。
+  # - size=0 表示关闭（默认）。
+  # - 若启用：建议先确保“整幅（或相机 ROI）”里能稳定检测到第一颗球；锁定后再由动态裁剪跟随。
+  # crop:
+  #   size: 640
+  #   smooth_alpha: 0.2
+  #   max_step_px: 120
+  #   reset_after_missed: 8
+
+  min_score: 0.25
+  require_views: 2
+
+  # 多球鲁棒定位参数：
+  max_detections_per_camera: 10
+  max_reproj_error_px: 8.0
+  max_uv_match_dist_px: 25.0
+  merge_dist_m: 0.08
+
+output:
+  # 输出 JSONL（可选；留空表示只打印/不写文件）
+  out_jsonl: data/tools_output/online_positions_3d.pt.jsonl
+
+trigger:
+  # 纯软件触发：trigger_source=Software 且 master_serial 为空 -> 所有相机 Software，并对全部相机下发软触发
+  trigger_source: Software
+  master_serial: ""
+  soft_trigger_fps: 5.0
+
+  # 以下字段目前主要用于 SDK 侧设置/兼容，保持默认即可
+  master_line_out: Line1
+  master_line_source: ""
+  master_line_mode: Output
+  trigger_activation: FallingEdge
+  trigger_cache_enable: false
+
+# 可选：轨迹后处理（curve_stage，基于 curve_v3）。
+# 启用后会在每条输出记录中增加顶层 `curve` 字段（结构见 docs/architecture-and-dataflow.md）。
+#
+# curve:
+#   enabled: false
+#
+#   track:
+#     max_tracks: 4
+#     association_dist_m: 0.6
+#     max_missed_s: 0.6
+#     min_dt_s: 0.000001
+#
+#   corridor:
+#     y_min: 0.6
+#     y_max: 1.6
+#     y_step: 0.1
+#
+#   interception:
+#     enabled: false
+#     y_min: 0.7
+#     y_max: 1.2
+#     num_heights: 5
+#     r_hit_m: 0.15
+#
+#   conf:
+#     from: quality
+#     constant: 1.0
+#
+#   transform:
+#     y_offset_m: 0.0
+#     y_negate: false
+#
+#   obs_filter:
+#     min_views: 0
+#     min_quality: 0.0
+#     max_median_reproj_error_px: null
+#     max_ball_3d_std_m: null
+#
+#   episode:
+#     enabled: false
+#     buffer_s: 0.6
+#     min_obs: 5
+#
+#     start:
+#       z_dir: 0
+#       min_abs_dz_m: 0.25
+#       min_abs_vz_mps: 1.0
+#       gravity_mps2: 9.8
+#       gravity_tol_mps2: 3.0
+#
+#     end:
+#       stationary_speed_mps: 0.25
+#       end_if_stationary_s: 0.35
+#       end_after_predicted_land_s: 0.2
+#
+#     behavior:
+#       reset_predictor_on_start: true
+#       reset_predictor_on_end: true
+#       feed_curve_only_when_active: false
+#
+#     multi_track:
+#       lock_single_track: false

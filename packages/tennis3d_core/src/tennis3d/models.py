@@ -1,0 +1,78 @@
+"""tennis3d 公共数据模型（高内聚：只放数据结构定义）。
+
+说明：
+- 这些数据结构会被 online/offline/pipeline/tools/tests 共同使用。
+- 之所以放在顶层模块而不是 offline 子包下，是为了避免“目录语义误导”：
+  例如 Detection 并不属于离线专用类型。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Protocol, runtime_checkable
+
+import numpy as np
+
+
+@dataclass(frozen=True)
+class ImageItem:
+    """单张图片的元信息。"""
+
+    camera: str
+    path: Path
+    ts_str: str
+    ts_epoch_ms: int
+
+
+@dataclass(frozen=True)
+class MatchedTriple:
+    """以 base 为基准，对齐的三路图片。"""
+
+    base: ImageItem
+    cam2: Optional[ImageItem]
+    cam3: Optional[ImageItem]
+
+
+@dataclass(frozen=True)
+class Detection:
+    """单个检测结果。
+
+    bbox 坐标为原图像素坐标系下的 (x1, y1, x2, y2)。
+    """
+
+    bbox: tuple[float, float, float, float]
+    score: float
+    cls: int
+
+    @property
+    def center(self) -> tuple[float, float]:
+        x1, y1, x2, y2 = self.bbox
+        return (0.5 * (x1 + x2), 0.5 * (y1 + y2))
+
+
+class Detector(Protocol):
+    """检测器最小接口（供 pipeline/online/offline 复用）。
+
+    说明：
+    - 该协议放在 core 的公共模型层，用于打破 core -> detectors 的反向依赖。
+    - detectors 实现（fake/color/rknn/pt）位于 `tennis3d_detectors`。
+    """
+
+    def detect(self, img_bgr: np.ndarray) -> list[Detection]:  # noqa: D401 - 协议方法无需完整文档
+        ...
+
+
+@runtime_checkable
+class BatchDetector(Protocol):
+    """可选的批量检测接口（性能优化）。
+
+    说明：
+    - 这是对 Detector 的“可选扩展”，用于把同一组内的多相机图像做 micro-batch。
+    - pipeline 会在运行时探测该方法是否存在：存在则优先使用；否则回退到逐图 detect。
+    - 之所以不把该方法放进 Detector 协议，是为了不破坏已有最小实现（tests/tools 的 stub）。
+    """
+
+    def detect_batch(self, imgs_bgr: list[np.ndarray]) -> list[list[Detection]]:  # noqa: D401
+        ...
+

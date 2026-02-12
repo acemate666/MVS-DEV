@@ -1,0 +1,20 @@
+# curve_v3：本地生成物与缓存（不应进入版本控制）
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest
+.pytest_cache/
+
+# 虚拟环境（uv/venv）
+.venv/
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+
+# 临时文件
+output.txt

@@ -1,0 +1,40 @@
+﻿# interception 配置示例（YAML）
+#
+# 用法（示例）：
+#   from interception.config_yaml import load_interception_config_yaml
+#   cfg = load_interception_config_yaml("configs/interception.yaml")
+#
+# 说明：
+# - 顶层键对应 interception.config.InterceptionConfig 的字段名。
+# - 未知字段会报错。
+# - y_min/y_max 无默认值，因此必须填写。
+
+y_min: 0.35
+y_max: 1.10
+num_heights: 5
+
+r_hit_m: 0.15
+
+quantile_levels: [0.05, 0.50, 0.95]
+time_margin_quantile: 0.10
+
+score_alpha_time: 0.35
+score_dt_max_s: 1.0
+score_lambda_width: 1.0
+score_mu_crossing: 1.0
+
+min_crossing_prob: 0.4
+min_valid_candidates: 3
+
+eps_tau_s: 1.0e-3
+
+map_switch_enabled: true
+map_switch_min_points: 3
+map_switch_w_max: 0.7
+
+hysteresis_score_gain: 0.15
+hysteresis_w_max_gain: 0.08
+hysteresis_width_shrink_ratio: 0.25
+
+multi_peak_second_phit_threshold: 0.25
+multi_peak_separation_r_mult: 2.0

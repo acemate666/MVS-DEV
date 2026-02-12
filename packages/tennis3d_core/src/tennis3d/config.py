@@ -1,0 +1,818 @@
+"""配置模型（dataclass）与 YAML/JSON 加载。
+
+目标：
+- 用 dataclass 表达在线/离线入口所需的关键配置
+- 支持从 `.yaml/.yml/.json` 加载
+
+说明：
+- 当前 CLI 仍是主入口；配置文件用于“可复用的一组参数”。
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal, cast
+
+from tennis3d.curve_stage_config import CurveStageConfig
+
+
+def _as_section(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    """把配置中的“段落”解析成 dict。
+
+    约定：
+        - 段落不存在或为 null -> 空 dict
+        - 段落存在但不是对象 -> 报错
+
+    说明：
+        为了让 YAML/JSON 更易读，我们把大量字段收拢到嵌套段落中（例如 camera/run/detector/output/time）。
+        本函数是这些段落的统一解析入口。
+    """
+
+    v = parent.get(key)
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise RuntimeError(f"config section '{key}' must be an object")
+    return cast(dict[str, Any], v)
+
+
+def _load_mapping(path: Path) -> dict[str, Any]:
+    path = Path(path)
+    suf = path.suffix.lower()
+
+    if suf == ".json":
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    elif suf in {".yaml", ".yml"}:
+        try:
+            import yaml  # type: ignore
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("PyYAML 未安装，无法读取 YAML 配置") from exc
+
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    else:
+        raise RuntimeError(f"不支持的配置文件类型: {path}（仅支持 .json/.yaml/.yml）")
+
+    if not isinstance(data, dict):
+        raise RuntimeError("配置文件顶层必须是对象（dict）")
+
+    return data
+
+
+def _as_path(x: Any) -> Path:
+    return Path(str(x)).expanduser()
+
+
+def _as_optional_path(x: Any) -> Path | None:
+    if x is None:
+        return None
+    s = str(x).strip()
+    if not s:
+        return None
+    return Path(s).expanduser()
+
+
+def _as_optional_positive_int(x: Any) -> int | None:
+    """把可能为 None/0/空的值解析成可选正整数。
+
+    约定：
+        - None/""/0 -> None（表示“不设置”）
+        - >0 -> int
+    """
+
+    if x is None:
+        return None
+    try:
+        v = int(x)
+    except Exception:
+        s = str(x).strip()
+        if not s:
+            return None
+        v = int(s)
+
+    if v <= 0:
+        return None
+    return int(v)
+
+
+def _as_int(x: Any, default: int = 0) -> int:
+    if x is None:
+        return int(default)
+    try:
+        return int(x)
+    except Exception:
+        s = str(x).strip()
+        return int(s) if s else int(default)
+
+
+def _as_auto_mode_str(x: Any) -> str:
+    """把 YAML/JSON 中的 *_auto 模式解析成 GenICam 期望的字符串。
+
+    背景：
+        PyYAML 的 `safe_load()` 默认按 YAML 1.1 解析标量，未加引号的 Off/On/Yes/No
+        可能会被解析为 bool（False/True）。
+
+        对 ExposureAuto/GainAuto 这类枚举节点而言，"False" 不是合法枚举值，
+        直接下发会触发 MV_E_PARAMETER(0x80000004)。
+
+    约定：
+        - None -> ""（表示“不设置”）
+        - False -> "Off"
+        - True -> "Continuous"（最常见/最直观的“开自动”模式）
+        - 其它 -> str(x).strip()
+    """
+
+    if x is None:
+        return ""
+
+    # YAML 兼容：Off/On 可能被解析成 bool。
+    if isinstance(x, bool):
+        return "Continuous" if bool(x) else "Off"
+
+    return str(x).strip()
+
+
+def _as_optional_float(x: Any) -> float | None:
+    """把可能为空/None 的值解析为Optional浮点数。
+
+    约定：
+        - None/"" -> None
+        - 其它 -> float
+    """
+
+    if x is None:
+        return None
+    s = str(x).strip()
+    if not s:
+        return None
+    return float(x)
+
+
+_DETECTOR = Literal["fake", "color", "rknn", "pt"]
+_GROUP_BY = Literal["frame_num", "sequence"]
+_TIME_SYNC_MODE = Literal["frame_host_timestamp", "dev_timestamp_mapping"]
+_TERMINAL_PRINT_MODE = Literal["best", "all", "none"]
+
+
+def _as_detector(x: Any, default: str) -> _DETECTOR:
+    s = str(x if x is not None else default).strip().lower()
+    if s not in {"fake", "color", "rknn", "pt"}:
+        raise RuntimeError(f"unknown detector: {s} (expected: fake|color|rknn|pt)")
+    return cast(_DETECTOR, s)
+
+
+def _as_group_by(x: Any, default: str) -> _GROUP_BY:
+    s = str(x if x is not None else default).strip()
+    if s not in {"frame_num", "sequence"}:
+        raise RuntimeError(f"unknown group_by: {s} (expected: frame_num|sequence)")
+    return cast(_GROUP_BY, s)
+
+
+def _as_time_sync_mode(x: Any, default: str) -> _TIME_SYNC_MODE:
+    s = str(x if x is not None else default).strip()
+    if s not in {"frame_host_timestamp", "dev_timestamp_mapping"}:
+        raise RuntimeError(
+            f"unknown time_sync_mode: {s} (expected: frame_host_timestamp|dev_timestamp_mapping)"
+        )
+    return cast(_TIME_SYNC_MODE, s)
+
+
+def _as_terminal_print_mode(x: Any, default: str) -> _TERMINAL_PRINT_MODE:
+    s = str(x if x is not None else default).strip().lower()
+    if s not in {"best", "all", "none"}:
+        raise RuntimeError(f"unknown terminal_print_mode: {s} (expected: best|all|none)")
+    return cast(_TERMINAL_PRINT_MODE, s)
+
+
+def _as_curve_stage_config(x: Any) -> CurveStageConfig:
+    """解析Optional的 curve stage 配置段。
+
+    说明：
+        - 该段用于把 3D 定位输出进一步做轨迹拟合（落点/落地时间/走廊）。
+        - 默认 disabled，不影响既有行为。
+    """
+
+    if x is None:
+        return CurveStageConfig()
+    if not isinstance(x, dict):
+        raise RuntimeError("config field 'curve' must be an object")
+
+    # 说明：curve 配置已升级为“分层结构”，避免把 track/episode/过滤/输出揉成一坨。
+    # 这里显式拒绝旧的扁平字段，以免用户以为配置生效但实际跑了默认值。
+    x = cast(dict[str, Any], x)
+    _old_flat_keys = {
+        "max_tracks",
+        "association_dist_m",
+        "max_missed_s",
+        "min_dt_s",
+        "corridor_y_min",
+        "corridor_y_max",
+        "corridor_y_step",
+        "conf_from",
+        "constant_conf",
+        "y_offset_m",
+        "y_negate",
+        "obs_min_views",
+        "obs_min_quality",
+        "obs_max_median_reproj_error_px",
+        "obs_max_ball_3d_std_m",
+        "episode_enabled",
+        "episode_buffer_s",
+        "episode_min_obs",
+        "episode_z_dir",
+        "episode_min_abs_dz_m",
+        "episode_min_abs_vz_mps",
+        "episode_gravity_mps2",
+        "episode_gravity_tol_mps2",
+        "episode_stationary_speed_mps",
+        "episode_end_if_stationary_s",
+        "episode_end_after_predicted_land_s",
+        "reset_predictor_on_episode_start",
+        "reset_predictor_on_episode_end",
+        "feed_curve_only_when_episode_active",
+        "episode_lock_single_track",
+    }
+    bad_keys = sorted([k for k in _old_flat_keys if k in x])
+    if bad_keys:
+        raise RuntimeError(
+            "curve 配置已升级为分层结构，旧扁平字段不再支持："
+            + ", ".join(bad_keys)
+            + "。请改用 curve.track/curve.corridor/curve.conf/curve.transform/"
+            + "curve.obs_filter/curve.episode 等子段。"
+        )
+
+    # 说明：curve_stage 已切换到独立包 curve_v3，不再支持 v2/v3_legacy 相关配置。
+    # 为避免用户误以为配置生效，这里显式拒绝这些字段。
+    _unsupported_top_keys = {"primary", "compare", "legacy"}
+    bad_top = sorted([k for k in _unsupported_top_keys if k in x])
+    if bad_top:
+        raise RuntimeError(
+            "curve 配置不再支持这些字段："
+            + ", ".join(bad_top)
+            + "。当前仅支持 curve.enabled/curve.track/curve.corridor/curve.conf/"
+            + "curve.transform/curve.obs_filter/curve.episode。"
+        )
+
+    track = _as_section(x, "track")
+    corridor = _as_section(x, "corridor")
+    interception = _as_section(x, "interception")
+    conf = _as_section(x, "conf")
+    transform = _as_section(x, "transform")
+    obs_filter = _as_section(x, "obs_filter")
+    episode = _as_section(x, "episode")
+    episode_start = _as_section(episode, "start")
+    episode_end = _as_section(episode, "end")
+    episode_behavior = _as_section(episode, "behavior")
+    episode_multi_track = _as_section(episode, "multi_track")
+
+    conf_from = str(conf.get("from", "quality")).strip().lower()
+    if conf_from not in {"quality", "constant"}:
+        raise RuntimeError("curve.conf.from must be 'quality' or 'constant'")
+
+    # Optional浮点字段：先取 raw，再转换，避免 None/Unknown 触发类型告警。
+    obs_max_median_reproj_error_px = obs_filter.get("max_median_reproj_error_px")
+    obs_max_median_reproj_error_px_f = (
+        float(obs_max_median_reproj_error_px) if obs_max_median_reproj_error_px is not None else None
+    )
+    obs_max_ball_3d_std_m = obs_filter.get("max_ball_3d_std_m")
+    obs_max_ball_3d_std_m_f = float(obs_max_ball_3d_std_m) if obs_max_ball_3d_std_m is not None else None
+
+    cfg = CurveStageConfig(
+        enabled=bool(x.get("enabled", False)),
+        max_tracks=int(track.get("max_tracks", 4)),
+        association_dist_m=float(track.get("association_dist_m", 0.6)),
+        max_missed_s=float(track.get("max_missed_s", 0.6)),
+        min_dt_s=float(track.get("min_dt_s", 1e-6)),
+        corridor_y_min=float(corridor.get("y_min", 0.6)),
+        corridor_y_max=float(corridor.get("y_max", 1.6)),
+        corridor_y_step=float(corridor.get("y_step", 0.1)),
+        interception_enabled=bool(interception.get("enabled", False)),
+        interception_y_min=float(interception.get("y_min", 0.7)),
+        interception_y_max=float(interception.get("y_max", 1.2)),
+        interception_num_heights=int(interception.get("num_heights", 5)),
+        interception_r_hit_m=float(interception.get("r_hit_m", 0.15)),
+        conf_from=conf_from,
+        constant_conf=float(conf.get("constant", 1.0)),
+        y_offset_m=float(transform.get("y_offset_m", 0.0)),
+        y_negate=bool(transform.get("y_negate", False)),
+
+        # 观测过滤（默认关闭）
+        obs_min_views=int(obs_filter.get("min_views", 0)),
+        obs_min_quality=float(obs_filter.get("min_quality", 0.0)),
+        obs_max_median_reproj_error_px=obs_max_median_reproj_error_px_f,
+        obs_max_ball_3d_std_m=obs_max_ball_3d_std_m_f,
+
+        # episode（默认关闭）
+        episode_enabled=bool(episode.get("enabled", False)),
+        episode_buffer_s=float(episode.get("buffer_s", 0.6)),
+        # 说明：episode_start 判定固定为“z 方向门控 + y 轴重力一致性”，
+        # 因此这里的最小点数要求至少 3（建议更高）。
+        episode_min_obs=int(episode.get("min_obs", 5)),
+        episode_z_dir=int(episode_start.get("z_dir", 0)),
+        episode_min_abs_dz_m=float(episode_start.get("min_abs_dz_m", 0.25)),
+        episode_min_abs_vz_mps=float(episode_start.get("min_abs_vz_mps", 1.0)),
+        episode_gravity_mps2=float(episode_start.get("gravity_mps2", 9.8)),
+        episode_gravity_tol_mps2=float(episode_start.get("gravity_tol_mps2", 3.0)),
+        episode_stationary_speed_mps=float(episode_end.get("stationary_speed_mps", 0.25)),
+        episode_end_if_stationary_s=float(episode_end.get("end_if_stationary_s", 0.35)),
+        episode_end_after_predicted_land_s=float(episode_end.get("end_after_predicted_land_s", 0.2)),
+        reset_predictor_on_episode_start=bool(episode_behavior.get("reset_predictor_on_start", True)),
+        reset_predictor_on_episode_end=bool(episode_behavior.get("reset_predictor_on_end", True)),
+        feed_curve_only_when_episode_active=bool(
+            episode_behavior.get("feed_curve_only_when_active", False)
+        ),
+
+        # episode 多 track 处置策略（默认关闭）
+        episode_lock_single_track=bool(episode_multi_track.get("lock_single_track", False)),
+    )
+
+    if cfg.max_tracks <= 0:
+        raise RuntimeError("curve.track.max_tracks must be > 0")
+    if cfg.association_dist_m <= 0:
+        raise RuntimeError("curve.track.association_dist_m must be > 0")
+    if cfg.max_missed_s < 0:
+        raise RuntimeError("curve.track.max_missed_s must be >= 0")
+    if cfg.min_dt_s <= 0:
+        raise RuntimeError("curve.track.min_dt_s must be > 0")
+    if cfg.corridor_y_step <= 0:
+        raise RuntimeError("curve.corridor.y_step must be > 0")
+    if cfg.corridor_y_max <= cfg.corridor_y_min:
+        raise RuntimeError("curve.corridor.y_max must be > curve.corridor.y_min")
+
+    if cfg.interception_y_max <= cfg.interception_y_min:
+        raise RuntimeError("curve.interception.y_max must be > curve.interception.y_min")
+    if cfg.interception_num_heights <= 0:
+        raise RuntimeError("curve.interception.num_heights must be > 0")
+    if cfg.interception_r_hit_m <= 0:
+        raise RuntimeError("curve.interception.r_hit_m must be > 0")
+
+    if cfg.obs_min_views < 0:
+        raise RuntimeError("curve.obs_filter.min_views must be >= 0")
+    if cfg.obs_min_quality < 0:
+        raise RuntimeError("curve.obs_filter.min_quality must be >= 0")
+    if cfg.obs_max_median_reproj_error_px is not None and cfg.obs_max_median_reproj_error_px <= 0:
+        raise RuntimeError("curve.obs_filter.max_median_reproj_error_px must be > 0")
+    if cfg.obs_max_ball_3d_std_m is not None and cfg.obs_max_ball_3d_std_m <= 0:
+        raise RuntimeError("curve.obs_filter.max_ball_3d_std_m must be > 0")
+
+    # episode 相关约束：即使未启用也做基本健壮性校验，避免写错配置后静默异常。
+    if cfg.episode_buffer_s < 0:
+        raise RuntimeError("curve.episode.buffer_s must be >= 0")
+    if cfg.episode_min_obs < 3:
+        raise RuntimeError("curve.episode.min_obs must be >= 3")
+    if cfg.episode_z_dir not in {-1, 0, 1}:
+        raise RuntimeError("curve.episode.start.z_dir must be -1, 0 or 1")
+    if cfg.episode_min_abs_dz_m < 0:
+        raise RuntimeError("curve.episode.start.min_abs_dz_m must be >= 0")
+    if cfg.episode_min_abs_vz_mps < 0:
+        raise RuntimeError("curve.episode.start.min_abs_vz_mps must be >= 0")
+    if cfg.episode_gravity_mps2 <= 0:
+        raise RuntimeError("curve.episode.start.gravity_mps2 must be > 0")
+    if cfg.episode_gravity_tol_mps2 < 0:
+        raise RuntimeError("curve.episode.start.gravity_tol_mps2 must be >= 0")
+    if cfg.episode_stationary_speed_mps < 0:
+        raise RuntimeError("curve.episode.end.stationary_speed_mps must be >= 0")
+    if cfg.episode_end_if_stationary_s < 0:
+        raise RuntimeError("curve.episode.end.end_if_stationary_s must be >= 0")
+    if cfg.episode_end_after_predicted_land_s < 0:
+        raise RuntimeError("curve.episode.end.end_after_predicted_land_s must be >= 0")
+
+    return cfg
+
+
+@dataclass(frozen=True)
+class OfflineAppConfig:
+    captures_dir: Path
+    calib: Path
+    # Optional：仅使用这些相机序列号（serial）参与检测/定位；None 表示使用 captures 中出现的全部相机。
+    serials: list[str] | None = None
+    detector: _DETECTOR = "color"
+    model: Path | None = None
+    # detector=pt 时Optional：Ultralytics 推理设备。
+    # 说明：
+    # - 默认 cpu（保持旧行为）。
+    # - CUDA 环境可写 cuda:0 / 0 / cuda。
+    # - 该字段仅影响 detector=pt，其它 detector 会忽略。
+    pt_device: str = "cpu"
+    min_score: float = 0.25
+    require_views: int = 2
+    max_detections_per_camera: int = 10
+    max_reproj_error_px: float = 8.0
+    max_uv_match_dist_px: float = 25.0
+    merge_dist_m: float = 0.08
+    max_groups: int = 0
+    out_jsonl: Path = Path("data/tools_output/offline_positions_3d.jsonl")
+
+    # Optional：方案B（对齐映射）
+    # - frame_host_timestamp：沿用原逻辑，用组内 frames[*].host_timestamp 中位数作为 capture_t_abs
+    # - dev_timestamp_mapping：使用预先拟合的 dev_timestamp -> host_ms 映射，把组时间贴近曝光时刻
+    time_sync_mode: _TIME_SYNC_MODE = "frame_host_timestamp"
+    time_mapping_path: Path | None = None
+
+    # Optional：轨迹拟合后处理（落点/落地时间/走廊）。默认 disabled。
+    curve: CurveStageConfig = CurveStageConfig()
+
+
+@dataclass(frozen=True)
+class OnlineTriggerConfig:
+    trigger_source: str = "Software"
+    master_serial: str = ""
+    master_line_out: str = "Line1"
+    master_line_source: str = ""
+    master_line_mode: str = "Output"
+    soft_trigger_fps: float = 5.0
+    trigger_activation: str = "FallingEdge"
+    trigger_cache_enable: bool = False
+
+
+@dataclass(frozen=True)
+class OnlineAppConfig:
+    # MVS 官方 Python 示例绑定目录（MvImport）。Optional；不填则依赖环境变量/自动探测。
+    mvimport_dir: Path | None
+    dll_dir: Path | None
+    serials: list[str]
+
+    group_by: _GROUP_BY = "frame_num"
+    timeout_ms: int = 1000
+    group_timeout_ms: int = 1000
+    max_pending_groups: int = 256
+    max_groups: int = 0
+
+    # 采集等待策略：若 >0，则在连续这么久拿不到“完整组包”时退出。
+    # 说明：该参数主要用于排障（例如硬触发线路未接好时避免无限等待）。
+    max_wait_seconds: float = 0.0
+
+    # 实时策略：只处理“最新完整组”（latest-only）。
+    #
+    # 说明：
+    # - 当 pipeline 吞吐低于触发/采集吞吐时，启用该策略可避免 backlog 线性增长（保持输出新鲜）。
+    # - 代价是跳组/丢帧；输出 fps 仍由 pipeline 可持续吞吐决定。
+    latest_only: bool = False
+
+    # Optional：相机图像参数（ROI/像素格式）。
+    # 约定：
+    # - pixel_format 为空表示不设置（沿用相机当前配置）。
+    # - image_width/image_height 同时设置才生效；否则将报错。
+    pixel_format: str = ""
+    image_width: int | None = None
+    image_height: int | None = None
+    image_offset_x: int = 0
+    image_offset_y: int = 0
+
+    # Optional：曝光/增益（会在 StartGrabbing 前下发）。
+    # 说明：
+    # - 默认保持旧行为：关闭 Auto，并设置固定曝光/增益。
+    # - 若想完全不干预曝光/增益，可显式把 exposure_auto/gain_auto 置空字符串，
+    #   且把 exposure_time_us/gain 置为 null。
+    exposure_auto: str = "Off"
+    exposure_time_us: float | None = 10000.0
+    gain_auto: str = "Off"
+    gain: float | None = 12.0
+
+    calib: Path = Path("data/calibration/example_triple_camera_calib.json")
+    detector: _DETECTOR = "fake"
+    model: Path | None = None
+    # detector=pt 时Optional：Ultralytics 推理设备（默认 cpu）。
+    # 说明：CUDA 环境可写 cuda:0 / 0 / cuda。
+    pt_device: str = "cpu"
+    min_score: float = 0.25
+    require_views: int = 2
+    max_detections_per_camera: int = 10
+    max_reproj_error_px: float = 8.0
+    max_uv_match_dist_px: float = 25.0
+    merge_dist_m: float = 0.08
+    out_jsonl: Path | None = None
+
+    # JSONL 写盘策略（性能相关）：
+    # - out_jsonl_only_when_balls=true：仅当 balls 非空时才写盘，避免无球阶段刷文件。
+    # - out_jsonl_flush_every_records：每写入 N 条记录就 flush 一次（1 表示每条都 flush，最安全但最慢）。
+    # - out_jsonl_flush_interval_s：距离上次 flush 超过该秒数则 flush（0 表示禁用基于时间的 flush）。
+    # 说明：默认保持旧行为（每条记录 flush），避免改变既有语义。
+    out_jsonl_only_when_balls: bool = False
+    out_jsonl_flush_every_records: int = 1
+    out_jsonl_flush_interval_s: float = 0.0
+
+    # 终端输出策略：
+    # - best：只打印每个 group 的最佳球（更安静，默认）
+    # - all：打印该 group 的所有球（便于调参/排障）
+    # - none：完全静默（不打印逐组球信息；适合追求吞吐或重定向到文件时）
+    terminal_print_mode: _TERMINAL_PRINT_MODE = "best"
+
+    # Optional：逐组终端打印节流（秒）。
+    # - 0 表示不节流（默认，保持旧行为：每组都打印）。
+    # - >0 表示“相邻两次逐组打印”至少间隔这么多秒。
+    # 说明：
+    # - 该字段只影响逐组打印（terminal_print_mode=best/all）与 timing 等逐组输出；
+    #   不影响 terminal_status_interval_s 的心跳状态行。
+    terminal_print_interval_s: float = 0.0
+
+    # Optional：周期性输出“状态心跳”，用于无球阶段确认程序仍在跑，以及观察吞吐。
+    # - 0 表示关闭（默认）。
+    # - >0 表示每隔这么多秒打印一行统计。
+    terminal_status_interval_s: float = 0.0
+
+    # Optional：逐组（每个 record / loop）打印耗时分解，用于在线排障与性能观察。
+    # 说明：
+    # - 该输出会比较“吵”，默认关闭。
+    # - 耗时来源主要是 pipeline 内部的 latency_host（align/detect/localize/total），
+    #   以及 output_loop 自己统计的 write/print 耗时。
+    terminal_timing: bool = False
+
+    # 在线时间轴：默认仍用 frames[*].host_timestamp 中位数。
+    # 若需要更贴近曝光时刻，可启用方案B在线滑窗映射（dev_timestamp -> host_ms）。
+    time_sync_mode: _TIME_SYNC_MODE = "frame_host_timestamp"
+    time_mapping_warmup_groups: int = 20
+    time_mapping_window_groups: int = 200
+    time_mapping_update_every_groups: int = 5
+    time_mapping_min_points: int = 20
+    time_mapping_hard_outlier_ms: float = 50.0
+
+    # Optional：轨迹拟合后处理（落点/落地时间/走廊）。默认 disabled。
+    curve: CurveStageConfig = CurveStageConfig()
+
+    # Optional：软件裁剪（动态 ROI）。
+    # 说明：
+    # - 该裁剪发生在 detector 前，不需要逐帧修改相机 ROI 或标定。
+    # - detector 输出 bbox 会自动加回裁剪 offset，保证下游仍是“原图像素坐标系”。
+    # - detector_crop_size=0 表示关闭（默认）。
+    detector_crop_size: int = 0
+    detector_crop_smooth_alpha: float = 0.2
+    detector_crop_max_step_px: int = 120
+    detector_crop_reset_after_missed: int = 8
+
+    # Optional：相机侧 AOI（OffsetX/OffsetY）运行中平移。
+    # 说明：
+    # - 该能力依赖具体机型/固件：有些机型 StartGrabbing 后会锁定 OffsetX/OffsetY。
+    # - 一旦启用，**不要**对 calib 做 apply_sensor_roi_to_calibration 的一次性主点平移；
+    #   而是让 RoiController 返回每相机的 total_offset，把 bbox/uv 回写到满幅坐标系。
+    camera_aoi_runtime: bool = False
+    camera_aoi_update_every_groups: int = 2
+    camera_aoi_min_move_px: int = 8
+    camera_aoi_smooth_alpha: float = 0.3
+    camera_aoi_max_step_px: int = 160
+    camera_aoi_recenter_after_missed: int = 30
+
+    trigger: OnlineTriggerConfig = OnlineTriggerConfig()
+
+
+def load_offline_app_config(path: Path) -> OfflineAppConfig:
+    """加载离线入口配置。"""
+
+    data = _load_mapping(Path(path))
+
+    inp = data.get("input")
+    if not isinstance(inp, dict):
+        raise RuntimeError("offline config requires section 'input' (object)")
+    inp = cast(dict[str, Any], inp)
+
+    serials_raw = inp.get("serials")
+    serials: list[str] | None = None
+    if serials_raw is not None:
+        if not isinstance(serials_raw, list) or not serials_raw:
+            raise RuntimeError("offline config field 'input.serials' must be a non-empty list")
+        # 去重但保持顺序，避免用户写重复项导致误判数量。
+        seen: set[str] = set()
+        serials = []
+        for x in serials_raw:
+            s = str(x).strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            serials.append(s)
+        if not serials:
+            raise RuntimeError("offline config field 'input.serials' is empty after stripping")
+
+    curve = _as_curve_stage_config(data.get("curve"))
+
+    captures_dir = _as_path(inp.get("captures_dir"))
+    calib_path = _as_path(inp.get("calib"))
+
+    run = _as_section(data, "run")
+    output = _as_section(data, "output")
+    det = _as_section(data, "detector")
+    time = _as_section(data, "time")
+
+    time_sync_mode = _as_time_sync_mode(time.get("sync_mode"), "frame_host_timestamp")
+    time_mapping_path = _as_optional_path(time.get("mapping_path"))
+    if time_sync_mode == "dev_timestamp_mapping" and time_mapping_path is None:
+        # 约定：若启用方案B但未显式指定映射文件，则默认在 captures_dir 下寻找。
+        time_mapping_path = captures_dir / "time_mapping_dev_to_host_ms.json"
+
+    return OfflineAppConfig(
+        captures_dir=captures_dir,
+        calib=calib_path,
+        serials=serials,
+        detector=_as_detector(det.get("name"), "color"),
+        model=_as_optional_path(det.get("model")),
+        pt_device=str(det.get("pt_device", "cpu") or "cpu").strip() or "cpu",
+        min_score=float(det.get("min_score", 0.25)),
+        require_views=int(det.get("require_views", 2)),
+        max_detections_per_camera=int(det.get("max_detections_per_camera", 10)),
+        max_reproj_error_px=float(det.get("max_reproj_error_px", 8.0)),
+        max_uv_match_dist_px=float(det.get("max_uv_match_dist_px", 25.0)),
+        merge_dist_m=float(det.get("merge_dist_m", 0.08)),
+        max_groups=int(run.get("max_groups", 0)),
+        out_jsonl=_as_path(output.get("out_jsonl", "data/tools_output/offline_positions_3d.jsonl")),
+        time_sync_mode=time_sync_mode,
+        time_mapping_path=time_mapping_path,
+        curve=curve,
+    )
+
+
+def load_online_app_config(path: Path) -> OnlineAppConfig:
+    """加载在线入口配置。"""
+
+    data = _load_mapping(Path(path))
+
+    sdk = _as_section(data, "sdk")
+    camera_raw = data.get("camera")
+    if not isinstance(camera_raw, dict):
+        raise RuntimeError("online config requires section 'camera' (object)")
+    camera = cast(dict[str, Any], camera_raw)
+
+    run = _as_section(data, "run")
+    det = _as_section(data, "detector")
+    output = _as_section(data, "output")
+    time = _as_section(data, "time")
+
+    serials_raw = camera.get("serials")
+    if not isinstance(serials_raw, list) or not serials_raw:
+        raise RuntimeError("online config requires non-empty 'camera.serials' list")
+    serials = [str(x).strip() for x in serials_raw if str(x).strip()]
+    if not serials:
+        raise RuntimeError("online config requires non-empty 'camera.serials' list (after stripping)")
+
+    trig = data.get("trigger")
+    if trig is None:
+        trig = {}
+    if not isinstance(trig, dict):
+        raise RuntimeError("online config field 'trigger' must be an object")
+    trig = cast(dict[str, Any], trig)
+
+    trigger = OnlineTriggerConfig(
+        trigger_source=str(trig.get("trigger_source", "Software")).strip(),
+        master_serial=str(trig.get("master_serial", "")).strip(),
+        master_line_out=str(trig.get("master_line_out", "Line1")).strip(),
+        master_line_source=str(trig.get("master_line_source", "")).strip(),
+        master_line_mode=str(trig.get("master_line_mode", "Output")).strip(),
+        soft_trigger_fps=float(trig.get("soft_trigger_fps", 5.0)),
+        trigger_activation=str(trig.get("trigger_activation", "FallingEdge")).strip(),
+        trigger_cache_enable=bool(trig.get("trigger_cache_enable", False)),
+    )
+
+    curve = _as_curve_stage_config(data.get("curve"))
+
+    time_sync_mode = _as_time_sync_mode(time.get("sync_mode"), "frame_host_timestamp")
+    time_mapping_warmup_groups = int(time.get("mapping_warmup_groups", 20))
+    time_mapping_window_groups = int(time.get("mapping_window_groups", 200))
+    time_mapping_update_every_groups = int(time.get("mapping_update_every_groups", 5))
+    time_mapping_min_points = int(time.get("mapping_min_points", 20))
+    time_mapping_hard_outlier_ms = float(time.get("mapping_hard_outlier_ms", 50.0))
+
+    terminal_print_mode = _as_terminal_print_mode(output.get("terminal_print_mode"), "best")
+    terminal_print_interval_s = float(output.get("terminal_print_interval_s", 0.0))
+    terminal_status_interval_s = float(output.get("terminal_status_interval_s", 0.0))
+    terminal_timing = bool(output.get("terminal_timing", False))
+
+    out_jsonl_only_when_balls = bool(output.get("out_jsonl_only_when_balls", False))
+    out_jsonl_flush_every_records = int(output.get("out_jsonl_flush_every_records", 1))
+    out_jsonl_flush_interval_s = float(output.get("out_jsonl_flush_interval_s", 0.0))
+
+    # 约束：flush_every_records 必须为非负整数。
+    # - 0 表示禁用“按条数 flush”，仅依赖 flush_interval_s 或最终 close。
+    # - 1 表示每条都 flush（旧行为）。
+    if out_jsonl_flush_every_records < 0:
+        raise RuntimeError("online config out_jsonl_flush_every_records must be >= 0")
+    if out_jsonl_flush_interval_s < 0:
+        raise RuntimeError("online config out_jsonl_flush_interval_s must be >= 0")
+    if terminal_print_interval_s < 0:
+        raise RuntimeError("online config terminal_print_interval_s must be >= 0")
+    if terminal_status_interval_s < 0:
+        raise RuntimeError("online config terminal_status_interval_s must be >= 0")
+
+    pixel_format = str(camera.get("pixel_format", "") or "").strip()
+    roi = _as_section(camera, "roi")
+    image_width = _as_optional_positive_int(roi.get("width"))
+    image_height = _as_optional_positive_int(roi.get("height"))
+    image_offset_x = _as_int(roi.get("offset_x"), 0)
+    image_offset_y = _as_int(roi.get("offset_y"), 0)
+
+    # 曝光/增益：默认保持旧行为。
+    exposure = _as_section(camera, "exposure")
+    exposure_auto_raw = exposure.get("auto", "Off")
+    exposure_auto = _as_auto_mode_str(exposure_auto_raw)
+    exposure_time_us = _as_optional_float(exposure.get("time_us", 10000.0))
+    gain_section = _as_section(camera, "gain")
+    gain_auto_raw = gain_section.get("auto", "Off")
+    gain_auto = _as_auto_mode_str(gain_auto_raw)
+    gain = _as_optional_float(gain_section.get("value", 12.0))
+
+    if exposure_time_us is not None and float(exposure_time_us) <= 0:
+        raise RuntimeError("online config exposure_time_us must be > 0 (or null to disable)")
+    if gain is not None and float(gain) < 0:
+        raise RuntimeError("online config gain must be >= 0 (or null to disable)")
+
+    det_crop = _as_section(det, "crop")
+    detector_crop_size = _as_int(det_crop.get("size"), 0)
+    detector_crop_smooth_alpha = float(det_crop.get("smooth_alpha", 0.2))
+    detector_crop_max_step_px = _as_int(det_crop.get("max_step_px"), 120)
+    detector_crop_reset_after_missed = _as_int(det_crop.get("reset_after_missed"), 8)
+
+    aoi = _as_section(camera, "aoi")
+    camera_aoi_runtime = bool(aoi.get("runtime", False))
+    camera_aoi_update_every_groups = _as_int(aoi.get("update_every_groups"), 2)
+    camera_aoi_min_move_px = _as_int(aoi.get("min_move_px"), 8)
+    camera_aoi_smooth_alpha = float(aoi.get("smooth_alpha", 0.3))
+    camera_aoi_max_step_px = _as_int(aoi.get("max_step_px"), 160)
+    camera_aoi_recenter_after_missed = _as_int(aoi.get("recenter_after_missed"), 30)
+
+    if detector_crop_size < 0:
+        raise RuntimeError("online config detector_crop_size must be >= 0")
+    if detector_crop_max_step_px < 0:
+        raise RuntimeError("online config detector_crop_max_step_px must be >= 0")
+    if detector_crop_reset_after_missed < 0:
+        raise RuntimeError("online config detector_crop_reset_after_missed must be >= 0")
+    if not (0.0 <= float(detector_crop_smooth_alpha) <= 1.0):
+        raise RuntimeError("online config detector_crop_smooth_alpha must be in [0,1]")
+
+    if camera_aoi_update_every_groups < 0:
+        raise RuntimeError("online config camera_aoi_update_every_groups must be >= 0")
+    if bool(camera_aoi_runtime) and camera_aoi_update_every_groups < 1:
+        raise RuntimeError("online config camera_aoi_update_every_groups must be >= 1 when camera_aoi_runtime=true")
+    if camera_aoi_min_move_px < 0:
+        raise RuntimeError("online config camera_aoi_min_move_px must be >= 0")
+    if camera_aoi_max_step_px < 0:
+        raise RuntimeError("online config camera_aoi_max_step_px must be >= 0")
+    if camera_aoi_recenter_after_missed < 0:
+        raise RuntimeError("online config camera_aoi_recenter_after_missed must be >= 0")
+    if not (0.0 <= float(camera_aoi_smooth_alpha) <= 1.0):
+        raise RuntimeError("online config camera_aoi_smooth_alpha must be in [0,1]")
+
+    # 约束：宽高必须同时设置，避免出现“只裁宽不裁高”的歧义。
+    if (image_width is None) ^ (image_height is None):
+        raise RuntimeError(
+            "online config ROI 参数错误：image_width 与 image_height 必须同时设置，或同时不设置。"
+        )
+
+    return OnlineAppConfig(
+        mvimport_dir=_as_optional_path(sdk.get("mvimport_dir")),
+        dll_dir=_as_optional_path(sdk.get("dll_dir")),
+        serials=serials,
+        group_by=_as_group_by(run.get("group_by"), "frame_num"),
+        timeout_ms=int(run.get("timeout_ms", 1000)),
+        group_timeout_ms=int(run.get("group_timeout_ms", 1000)),
+        max_pending_groups=int(run.get("max_pending_groups", 256)),
+        max_groups=int(run.get("max_groups", 0)),
+        max_wait_seconds=float(run.get("max_wait_seconds", 0.0)),
+        latest_only=bool(run.get("latest_only", False)),
+        pixel_format=pixel_format,
+        image_width=image_width,
+        image_height=image_height,
+        image_offset_x=int(image_offset_x),
+        image_offset_y=int(image_offset_y),
+        exposure_auto=str(exposure_auto),
+        exposure_time_us=(float(exposure_time_us) if exposure_time_us is not None else None),
+        gain_auto=str(gain_auto),
+        gain=(float(gain) if gain is not None else None),
+        calib=_as_path(camera.get("calib", "data/calibration/example_triple_camera_calib.json")),
+        detector=_as_detector(det.get("name"), "fake"),
+        model=_as_optional_path(det.get("model")),
+        pt_device=str(det.get("pt_device", "cpu") or "cpu").strip() or "cpu",
+        min_score=float(det.get("min_score", 0.25)),
+        require_views=int(det.get("require_views", 2)),
+        max_detections_per_camera=int(det.get("max_detections_per_camera", 10)),
+        max_reproj_error_px=float(det.get("max_reproj_error_px", 8.0)),
+        max_uv_match_dist_px=float(det.get("max_uv_match_dist_px", 25.0)),
+        merge_dist_m=float(det.get("merge_dist_m", 0.08)),
+        out_jsonl=_as_optional_path(output.get("out_jsonl")),
+        out_jsonl_only_when_balls=out_jsonl_only_when_balls,
+        out_jsonl_flush_every_records=out_jsonl_flush_every_records,
+        out_jsonl_flush_interval_s=out_jsonl_flush_interval_s,
+        terminal_print_mode=terminal_print_mode,
+        terminal_print_interval_s=float(terminal_print_interval_s),
+        terminal_status_interval_s=terminal_status_interval_s,
+        terminal_timing=terminal_timing,
+        time_sync_mode=time_sync_mode,
+        time_mapping_warmup_groups=time_mapping_warmup_groups,
+        time_mapping_window_groups=time_mapping_window_groups,
+        time_mapping_update_every_groups=time_mapping_update_every_groups,
+        time_mapping_min_points=time_mapping_min_points,
+        time_mapping_hard_outlier_ms=time_mapping_hard_outlier_ms,
+        trigger=trigger,
+        curve=curve,
+
+        detector_crop_size=int(detector_crop_size),
+        detector_crop_smooth_alpha=float(detector_crop_smooth_alpha),
+        detector_crop_max_step_px=int(detector_crop_max_step_px),
+        detector_crop_reset_after_missed=int(detector_crop_reset_after_missed),
+
+        camera_aoi_runtime=bool(camera_aoi_runtime),
+        camera_aoi_update_every_groups=int(camera_aoi_update_every_groups),
+        camera_aoi_min_move_px=int(camera_aoi_min_move_px),
+        camera_aoi_smooth_alpha=float(camera_aoi_smooth_alpha),
+        camera_aoi_max_step_px=int(camera_aoi_max_step_px),
+        camera_aoi_recenter_after_missed=int(camera_aoi_recenter_after_missed),
+    )

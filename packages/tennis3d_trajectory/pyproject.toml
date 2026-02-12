@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tennis3d-trajectory"
+version = "0.1.0"
+description = "Tennis 3D trajectory postprocess: curve stage + optional interception"
+requires-python = ">=3.11"
+dependencies = [
+  "tennis3d-core",
+  "curve-v3",
+  "interception",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
