@@ -25,8 +25,3 @@
 常见离线运行示例：
 
 - `uv run tennis3d-offline --config <your_offline_config.yaml>`
-
-## 仓库约束（重要）
-
-- 跨包依赖边界：集成侧应只从包顶层“稳定 Public API”导入（例如 `from curve_v3 import ...`、`from interception import ...`）。
-  仓库中有对应的 repo hygiene 单测用于防止回归。
