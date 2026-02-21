@@ -17,8 +17,8 @@ dependencies = [
   "tennis3d-offline",
   "ipython>=8.38.0",
   # 说明：显式固定 PyTorch CUDA 版本，并从 PyTorch 官方索引安装 cu128 轮子。
-  "torch==2.6.0+cu128",
-  "torchvision==0.21.0+cu128",
+  "torch==2.10.0+cu128",
+  "torchvision==0.25.0+cu128",
   "ultralytics>=8.4.6",
 ]
 
